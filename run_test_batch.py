@@ -1,0 +1,123 @@
+import json
+import os
+import time
+from typing import Dict, List, Set
+
+from runner import execute_retry_loop
+from dedup import CorpusBalanceEngine, compute_jaccard_similarity, get_canonical_tokens
+
+PARADIGMS = [
+    "Dynamic Programming & Monotonic Queue",
+    "Graph Traversals & DFS/BFS",
+    "Disjoint Set Union (DSU) & Greedy Graph Analysis",
+    "Sliding Window & Two Pointers",
+    "Matrix Grid Traversals & Dynamic Programming",
+    "Min-Heap / Priority Queue Operations",
+    "Bitwise Operations & Masking",
+    "Trie & String Processing",
+]
+
+
+def run_batch_test(items_per_paradigm: int = 2):
+    print("=== STARTING PRODUCTION BATCH GENERATION & VERIFICATION PIPELINE ===")
+
+    stats = {
+        "generated": 0,
+        "approved": 0,
+        "dedup_dropped": 0,
+        "quarantined": 0,
+        "exceptions": 0,
+    }
+
+    os.makedirs("data", exist_ok=True)
+    os.makedirs("data/quarantine", exist_ok=True)
+
+    dedup_engine = CorpusBalanceEngine(max_per_paradigm=35, similarity_threshold=0.70)
+
+    seed_counter = 42
+
+    for paradigm_idx, paradigm in enumerate(PARADIGMS):
+        print(f"\n[+] Processing Paradigm [{paradigm_idx + 1}/{len(PARADIGMS)}]: '{paradigm}'...")
+
+        for i in range(items_per_paradigm):
+            sample_num = i + 1
+            seed = seed_counter
+            seed_counter += 1
+
+            if not dedup_engine.can_accept_paradigm(paradigm):
+                print(f"  [-] Sample {sample_num}: SKIPPED (Paradigm cap of {dedup_engine.max_per_paradigm} reached)")
+                continue
+
+            try:
+                success, candidate_data, result_msg = execute_retry_loop(
+                    paradigm=paradigm,
+                    seed=seed,
+                    max_retries=3,
+                )
+                stats["generated"] += 1
+
+                if not success or not candidate_data:
+                    stats["quarantined"] += 1
+                    print(f"  [X] Sample {sample_num}: QUARANTINED | Reason: {result_msg}")
+                    quarantine_record = {
+                        "paradigm": paradigm,
+                        "seed": seed,
+                        "reason": result_msg,
+                        "status": "QUARANTINE",
+                    }
+                    with open(
+                        f"data/quarantine/paradigm_{paradigm_idx}_quarantine.jsonl",
+                        "a",
+                        encoding="utf-8",
+                    ) as f:
+                        f.write(json.dumps(quarantine_record) + "\n")
+                    continue
+
+                full_code = candidate_data["code"]
+
+                # Deduplication Check (MinHash LSH + AST n-grams)
+                if dedup_engine.is_duplicate(full_code):
+                    stats["dedup_dropped"] += 1
+                    print(f"  [x] Sample {sample_num}: DROPPED (AST n-gram topology duplicate detected)")
+                    dup_record = {
+                        "status": "QUARANTINE",
+                        "reason": "Duplicate AST n-gram structure detected",
+                        "candidate": candidate_data,
+                    }
+                    with open(
+                        f"data/quarantine/paradigm_{paradigm_idx}_quarantine.jsonl",
+                        "a",
+                        encoding="utf-8",
+                    ) as f:
+                        f.write(json.dumps(dup_record) + "\n")
+                    continue
+
+                # Register candidate and record approval
+                dedup_engine.register_candidate(paradigm, full_code)
+                stats["approved"] += 1
+                attempts = candidate_data.get("attempts_used", 1)
+                print(f"  [✓] Sample {sample_num}: APPROVED | Attempts: {attempts}/3 | Seed: {seed}")
+
+                with open("data/approved_curriculum.jsonl", "a", encoding="utf-8") as f:
+                    f.write(json.dumps(candidate_data) + "\n")
+
+            except Exception as e:
+                stats["exceptions"] += 1
+                print(f"  [!] Exception on Paradigm '{paradigm}', Sample {sample_num}: {type(e).__name__} - {e}")
+                continue
+
+    total_valid = max(1, stats["generated"])
+    print("\n" + "=" * 60)
+    print("=== PRODUCTION BATCH PIPELINE TELEMETRY SUMMARY ===")
+    print(f"  Total Generation Attempts:  {stats['generated'] + stats['exceptions']}")
+    print(f"  Successful Candidates:      {stats['generated']}")
+    print(f"  Pipeline Exceptions:        {stats['exceptions']}")
+    print("  ------------------------------------------------------------")
+    print(f"  Approved Solutions:         {stats['approved']} ({(stats['approved'] / total_valid) * 100:.1f}%)")
+    print(f"  Quarantined / Hard Fails:   {stats['quarantined']} ({(stats['quarantined'] / total_valid) * 100:.1f}%)")
+    print(f"  AST Topology Duplicates:    {stats['dedup_dropped']} ({(stats['dedup_dropped'] / total_valid) * 100:.1f}%)")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    run_batch_test(items_per_paradigm=1)

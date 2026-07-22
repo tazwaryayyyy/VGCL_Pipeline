@@ -1,0 +1,19 @@
+# Security & Credentials
+.env
+*.env
+
+# Python Caches & Virtual Environments
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Generated Pipeline Data & Output Artifacts
+data/
+*.json
+*.jsonl
+
+# IDE Settings
+.vscode/
+.idea/
