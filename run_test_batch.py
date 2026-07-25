@@ -49,6 +49,10 @@ def run_batch_test(items_per_paradigm: int = 2):
                 continue
 
             try:
+                # Small inter-request pause to avoid hammering RPM limits
+                if i > 0 or paradigm_idx > 0:
+                    time.sleep(3)
+
                 success, candidate_data, result_msg = execute_retry_loop(
                     paradigm=paradigm,
                     seed=seed,
