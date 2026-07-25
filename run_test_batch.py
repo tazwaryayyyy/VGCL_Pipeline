@@ -1,7 +1,14 @@
+import io
 import json
 import os
+import sys
 import time
 from typing import Dict, List, Set
+
+# Force UTF-8 stdout on Windows to prevent UnicodeEncodeError from LLM responses
+if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 from runner import execute_retry_loop
 from dedup import CorpusBalanceEngine, compute_jaccard_similarity, get_canonical_tokens
@@ -100,10 +107,15 @@ def run_batch_test(items_per_paradigm: int = 2):
                 dedup_engine.register_candidate(paradigm, full_code)
                 stats["approved"] += 1
                 attempts = candidate_data.get("attempts_used", 1)
-                print(f"  [✓] Sample {sample_num}: APPROVED | Attempts: {attempts}/3 | Seed: {seed}")
 
+                # Write to disk FIRST — print failure must never lose data
                 with open("data/approved_curriculum.jsonl", "a", encoding="utf-8") as f:
                     f.write(json.dumps(candidate_data) + "\n")
+
+                try:
+                    print(f"  [OK] Sample {sample_num}: APPROVED | Attempts: {attempts}/3 | Seed: {seed}")
+                except Exception:
+                    print(f"  [OK] Sample {sample_num}: APPROVED | Attempts: {attempts}/3 | Seed: {seed}".encode('ascii', 'replace').decode())
 
             except Exception as e:
                 stats["exceptions"] += 1
