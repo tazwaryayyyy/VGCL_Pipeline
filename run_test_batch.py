@@ -3,15 +3,14 @@ import json
 import os
 import sys
 import time
-from typing import Dict, List, Set
+from typing import Dict, List
 
-# Force UTF-8 stdout on Windows to prevent UnicodeEncodeError from LLM responses
-if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
+from dedup import CorpusBalanceEngine
 from runner import execute_retry_loop
-from dedup import CorpusBalanceEngine, compute_jaccard_similarity, get_canonical_tokens
 
 PARADIGMS = [
     "Dynamic Programming & Monotonic Queue",
@@ -40,7 +39,6 @@ def run_batch_test(items_per_paradigm: int = 2):
     os.makedirs("data/quarantine", exist_ok=True)
 
     dedup_engine = CorpusBalanceEngine(max_per_paradigm=35, similarity_threshold=0.70)
-
     seed_counter = 42
 
     for paradigm_idx, paradigm in enumerate(PARADIGMS):
@@ -52,13 +50,12 @@ def run_batch_test(items_per_paradigm: int = 2):
             seed_counter += 1
 
             if not dedup_engine.can_accept_paradigm(paradigm):
-                print(f"  [-] Sample {sample_num}: SKIPPED (Paradigm cap of {dedup_engine.max_per_paradigm} reached)")
+                print(f"  [-] Sample {sample_num}: SKIPPED (Paradigm cap reached)")
                 continue
 
             try:
-                # Small inter-request pause to avoid hammering RPM limits
                 if i > 0 or paradigm_idx > 0:
-                    time.sleep(3)
+                    time.sleep(2)
 
                 success, candidate_data, result_msg = execute_retry_loop(
                     paradigm=paradigm,
@@ -82,14 +79,14 @@ def run_batch_test(items_per_paradigm: int = 2):
                         encoding="utf-8",
                     ) as f:
                         f.write(json.dumps(quarantine_record) + "\n")
+                        f.flush()
                     continue
 
                 full_code = candidate_data["code"]
 
-                # Deduplication Check (MinHash LSH + AST n-grams)
                 if dedup_engine.is_duplicate(full_code):
                     stats["dedup_dropped"] += 1
-                    print(f"  [x] Sample {sample_num}: DROPPED (AST n-gram topology duplicate detected)")
+                    print(f"  [x] Sample {sample_num}: DROPPED (Duplicate AST structure)")
                     dup_record = {
                         "status": "QUARANTINE",
                         "reason": "Duplicate AST n-gram structure detected",
@@ -101,21 +98,19 @@ def run_batch_test(items_per_paradigm: int = 2):
                         encoding="utf-8",
                     ) as f:
                         f.write(json.dumps(dup_record) + "\n")
+                        f.flush()
                     continue
 
-                # Register candidate and record approval
                 dedup_engine.register_candidate(paradigm, full_code)
                 stats["approved"] += 1
                 attempts = candidate_data.get("attempts_used", 1)
 
-                # Write to disk FIRST — print failure must never lose data
                 with open("data/approved_curriculum.jsonl", "a", encoding="utf-8") as f:
                     f.write(json.dumps(candidate_data) + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())
 
-                try:
-                    print(f"  [OK] Sample {sample_num}: APPROVED | Attempts: {attempts}/3 | Seed: {seed}")
-                except Exception:
-                    print(f"  [OK] Sample {sample_num}: APPROVED | Attempts: {attempts}/3 | Seed: {seed}".encode('ascii', 'replace').decode())
+                print(f"  [OK] Sample {sample_num}: APPROVED | Attempts: {attempts}/3 | Seed: {seed}")
 
             except Exception as e:
                 stats["exceptions"] += 1
@@ -126,9 +121,6 @@ def run_batch_test(items_per_paradigm: int = 2):
     print("\n" + "=" * 60)
     print("=== PRODUCTION BATCH PIPELINE TELEMETRY SUMMARY ===")
     print(f"  Total Generation Attempts:  {stats['generated'] + stats['exceptions']}")
-    print(f"  Successful Candidates:      {stats['generated']}")
-    print(f"  Pipeline Exceptions:        {stats['exceptions']}")
-    print("  ------------------------------------------------------------")
     print(f"  Approved Solutions:         {stats['approved']} ({(stats['approved'] / total_valid) * 100:.1f}%)")
     print(f"  Quarantined / Hard Fails:   {stats['quarantined']} ({(stats['quarantined'] / total_valid) * 100:.1f}%)")
     print(f"  AST Topology Duplicates:    {stats['dedup_dropped']} ({(stats['dedup_dropped'] / total_valid) * 100:.1f}%)")

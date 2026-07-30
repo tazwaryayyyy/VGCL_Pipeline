@@ -7,20 +7,23 @@ BUILTIN_IDENTIFIERS = set(dir(builtins))
 
 
 class ASTCanonicalizer(ast.NodeTransformer):
-    """Normalizes variable names, docstrings, function names, classes, async functions, and call keywords."""
+    """Scope-aware AST Normalizer that resets variable mappings per function boundary."""
 
     def __init__(self):
-        self.mapping = {}
+        self.global_mapping = {}
+        self.local_mapping = {}
+        self.in_function = False
         self.var_idx = 0
         self.func_idx = 0
 
     def _get_var(self, name: str) -> str:
-        if name in BUILTIN_IDENTIFIERS:
+        if name in BUILTIN_IDENTIFIERS or name in {"solve", "solve_brute", "generate_test_cases"}:
             return name
-        if name not in self.mapping:
-            self.mapping[name] = f"v_{self.var_idx}"
+        target_map = self.local_mapping if self.in_function else self.global_mapping
+        if name not in target_map:
+            target_map[name] = f"v_{self.var_idx}"
             self.var_idx += 1
-        return self.mapping[name]
+        return target_map[name]
 
     def visit_Name(self, node: ast.Name) -> ast.Name:
         node.id = self._get_var(node.id)
@@ -30,34 +33,22 @@ class ASTCanonicalizer(ast.NodeTransformer):
         node.arg = self._get_var(node.arg)
         return self.generic_visit(node)
 
-    def visit_keyword(self, node: ast.keyword) -> ast.keyword:
-        if node.arg:
-            node.arg = self._get_var(node.arg)
-        return self.generic_visit(node)
-
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
-        self._strip_docstring(node)
-        if node.name not in self.mapping:
-            self.mapping[node.name] = f"fn_{self.func_idx}"
-            self.func_idx += 1
-        node.name = self.mapping[node.name]
-        return self.generic_visit(node)
+        old_in_func = self.in_function
+        old_local = self.local_mapping.copy()
+        old_var_idx = self.var_idx
 
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AsyncFunctionDef:
-        self._strip_docstring(node)
-        if node.name not in self.mapping:
-            self.mapping[node.name] = f"fn_{self.func_idx}"
-            self.func_idx += 1
-        node.name = self.mapping[node.name]
-        return self.generic_visit(node)
+        self.in_function = True
+        self.local_mapping = {}
+        self.var_idx = 0  # Reset variable index for clean function-level scope
 
-    def visit_ClassDef(self, node: ast.ClassDef) -> ast.ClassDef:
         self._strip_docstring(node)
-        if node.name not in self.mapping:
-            self.mapping[node.name] = f"cls_{self.func_idx}"
-            self.func_idx += 1
-        node.name = self.mapping[node.name]
-        return self.generic_visit(node)
+        self.generic_visit(node)
+
+        self.in_function = old_in_func
+        self.local_mapping = old_local
+        self.var_idx = old_var_idx
+        return node
 
     def _strip_docstring(self, node: Any) -> None:
         if (
@@ -72,7 +63,7 @@ class ASTCanonicalizer(ast.NodeTransformer):
 
 
 def get_canonical_tokens(code_str: str) -> List[str]:
-    """Parses Python code and yields normalized AST token streams."""
+    """Parses Python code into scope-normalized AST token streams."""
     try:
         tree = ast.parse(code_str)
         norm_tree = ASTCanonicalizer().visit(tree)
@@ -84,7 +75,7 @@ def get_canonical_tokens(code_str: str) -> List[str]:
 
 
 def get_ngrams(tokens: List[str], k: int = 4) -> Set[Tuple[str, ...]]:
-    """Extracts overlapping n-gram tuples of size k from ordered token stream."""
+    """Extracts overlapping n-gram tuples of size k."""
     if not tokens:
         return set()
     eff_k = min(k, len(tokens))
@@ -102,11 +93,11 @@ def compute_jaccard_similarity(tokens_a: List[str], tokens_b: List[str], k: int 
         return 0.0
     intersection = len(ngrams_a.intersection(ngrams_b))
     union = len(ngrams_a.union(ngrams_b))
-    return intersection / union
+    return intersection / union if union > 0 else 0.0
 
 
 class CorpusBalanceEngine:
-    """Manages MinHash LSH deduplication with AST n-gram topology and paradigm balancing caps."""
+    """Manages MinHash LSH deduplication and paradigm balancing caps."""
 
     def __init__(self, max_per_paradigm: int = 35, similarity_threshold: float = 0.70, ngram_k: int = 4):
         self.max_per_paradigm = max_per_paradigm
@@ -114,13 +105,23 @@ class CorpusBalanceEngine:
         self.ngram_k = ngram_k
         self.paradigm_counts: Dict[str, int] = {}
         self.corpus_tokens: List[List[str]] = []
+        self.corpus_hashes: List[Set[int]] = []
 
     def can_accept_paradigm(self, paradigm: str) -> bool:
         return self.paradigm_counts.get(paradigm, 0) < self.max_per_paradigm
 
     def is_duplicate(self, code_str: str) -> bool:
         candidate_tokens = get_canonical_tokens(code_str)
-        for existing_tokens in self.corpus_tokens:
+        candidate_ngrams = get_ngrams(candidate_tokens, k=self.ngram_k)
+        candidate_hash_set = {hash(ng) for ng in candidate_ngrams}
+
+        for existing_hashes, existing_tokens in zip(self.corpus_hashes, self.corpus_tokens):
+            if candidate_hash_set and existing_hashes:
+                overlap = len(candidate_hash_set.intersection(existing_hashes))
+                approx_union = len(candidate_hash_set.union(existing_hashes))
+                if (overlap / approx_union) < (self.similarity_threshold - 0.15):
+                    continue
+
             sim = compute_jaccard_similarity(candidate_tokens, existing_tokens, k=self.ngram_k)
             if sim >= self.similarity_threshold:
                 return True
@@ -128,5 +129,8 @@ class CorpusBalanceEngine:
 
     def register_candidate(self, paradigm: str, code_str: str) -> None:
         tokens = get_canonical_tokens(code_str)
+        ngrams = get_ngrams(tokens, k=self.ngram_k)
+        hash_set = {hash(ng) for ng in ngrams}
         self.corpus_tokens.append(tokens)
+        self.corpus_hashes.append(hash_set)
         self.paradigm_counts[paradigm] = self.paradigm_counts.get(paradigm, 0) + 1

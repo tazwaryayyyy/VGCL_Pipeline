@@ -1,10 +1,10 @@
 import ast
 import copy
 import io
+import json
 import math
 import multiprocessing as mp
 import os
-import socket
 import sys
 import time
 import traceback
@@ -56,24 +56,17 @@ FORBIDDEN_ATTRIBUTES = {
 
 
 def _set_hardened_sandbox_limits() -> None:
-    """Injects POSIX OS-level CPU limits and blocks network access safely."""
+    """Injects POSIX OS-level CPU limits where available and restricts network sockets."""
     if resource and hasattr(resource, "RLIMIT_CPU"):
         try:
             resource.setrlimit(resource.RLIMIT_CPU, (2, 2))
         except Exception:
             pass
 
-    # Disable socket creation at module level and C-module level
     try:
         import socket
         socket.socket = None
         socket.create_connection = None
-    except Exception:
-        pass
-
-    try:
-        import _socket
-        _socket.socket = None
     except Exception:
         pass
 
@@ -93,8 +86,8 @@ def _check_peak_rss_limit() -> Optional[str]:
     return None
 
 
-def _truncate_repr(obj: Any, max_len: int = 1000) -> str:
-    """Safely truncates string representations of failing input payloads to prevent IPC bloat."""
+def _truncate_repr(obj: Any, max_len: int = 500) -> str:
+    """Safely truncates string representations of payloads to prevent IPC Pipe buffer overflow."""
     try:
         r = repr(obj)
         if len(r) > max_len:
@@ -105,23 +98,27 @@ def _truncate_repr(obj: Any, max_len: int = 1000) -> str:
 
 
 def _are_results_equal(a: Any, b: Any, rel_tol: float = 1e-6, abs_tol: float = 1e-6) -> bool:
-    """Robust differential equality check handling floats, NaNs, nested containers, and numerical types."""
-    if type(a) != type(b):
-        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
-            return math.isclose(a, b, rel_tol=rel_tol, abs_tol=abs_tol)
-        return False
+    """Type-strict differential equality check."""
+    if type(a) is not type(b):
+        if not (isinstance(a, (int, float)) and isinstance(b, (int, float))):
+            return False
+        if isinstance(a, bool) or isinstance(b, bool):
+            return False
 
-    if isinstance(a, float):
+    if isinstance(a, float) or isinstance(b, float):
         if math.isnan(a) and math.isnan(b):
             return True
         return math.isclose(a, b, rel_tol=rel_tol, abs_tol=abs_tol)
 
-    if isinstance(a, (list, tuple)):
+    if isinstance(a, (int, float)):
+        return a == b
+
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
         if len(a) != len(b):
             return False
         return all(_are_results_equal(x, y, rel_tol, abs_tol) for x, y in zip(a, b))
 
-    if isinstance(a, dict):
+    if isinstance(a, dict) and isinstance(b, dict):
         if a.keys() != b.keys():
             return False
         return all(_are_results_equal(a[k], b[k], rel_tol, abs_tol) for k in a)
@@ -225,7 +222,7 @@ def _worker_exec_phase_a(code_str: str, seed: int, conn) -> None:
                 conn.send(
                     (
                         False,
-                        f"Phase A Mismatch on small test #{idx + 1}: Optimal={ans_opt} vs Brute={ans_brute}",
+                        f"Phase A Mismatch on small test #{idx + 1}: Optimal={_truncate_repr(ans_opt)} vs Brute={_truncate_repr(ans_brute)}",
                         _truncate_repr(pass_args),
                     )
                 )
@@ -240,7 +237,7 @@ def _worker_exec_phase_a(code_str: str, seed: int, conn) -> None:
     except Exception as e:
         tb_lines = traceback.format_exc()
         input_str = _truncate_repr(current_args) if current_args is not None else "N/A"
-        conn.send((False, f"Phase A Runtime Exception: {type(e).__name__}: {e}\n{tb_lines}", input_str))
+        conn.send((False, f"Phase A Runtime Exception: {type(e).__name__}: {e}\n{tb_lines[:300]}", input_str))
 
 
 def _worker_exec_phase_bc(code_str: str, seed: int, conn) -> None:
@@ -253,7 +250,6 @@ def _worker_exec_phase_bc(code_str: str, seed: int, conn) -> None:
         solve = exec_globals["solve"]
         gen_cases = exec_globals["generate_test_cases"]
 
-        # Phase B: Boundary test assertions
         boundary_cases = gen_cases(seed=seed, scale="small")
         for args in boundary_cases[:3]:
             pass_args = args if isinstance(args, (list, tuple)) else (args,)
@@ -271,7 +267,6 @@ def _worker_exec_phase_bc(code_str: str, seed: int, conn) -> None:
                 )
                 return
 
-        # Phase C: Performance Verification (N = 10^4 to 10^5) generated inside worker memory space
         large_cases = gen_cases(seed=seed, scale="large")[:5]
         for idx, args in enumerate(large_cases):
             pass_args = args if isinstance(args, (list, tuple)) else (args,)
@@ -300,7 +295,7 @@ def _worker_exec_phase_bc(code_str: str, seed: int, conn) -> None:
     except Exception as e:
         tb_lines = traceback.format_exc()
         input_str = _truncate_repr(current_args) if current_args is not None else "N/A"
-        conn.send((False, f"Phase B/C Exception: {type(e).__name__}: {e}\n{tb_lines}", input_str))
+        conn.send((False, f"Phase B/C Exception: {type(e).__name__}: {e}\n{tb_lines[:300]}", input_str))
 
 
 def _safe_run_process(ctx: Any, target_func: Any, code_str: str, seed: int, timeout: float) -> Tuple[bool, str, Optional[str]]:
@@ -334,7 +329,7 @@ def _safe_run_process(ctx: Any, target_func: Any, code_str: str, seed: int, time
         if p.is_alive():
             try:
                 p.kill()
-                p.join()
+                p.join(timeout=0.5)
             except Exception:
                 pass
 
@@ -347,14 +342,33 @@ def run_full_verification(code_str: str, seed: int = 42) -> Tuple[bool, str, Opt
 
     ctx = mp.get_context("spawn")
 
-    # Phase A execution
     ok_a, msg_a, input_a = _safe_run_process(ctx, _worker_exec_phase_a, code_str, seed, timeout=4.0)
     if not ok_a:
         return False, msg_a, input_a
 
-    # Phase B & C execution
     ok_bc, msg_bc, input_bc = _safe_run_process(ctx, _worker_exec_phase_bc, code_str, seed, timeout=12.0)
     if not ok_bc:
         return False, msg_bc, input_bc
 
     return True, "VERIFICATION_SUCCESS", None
+
+
+def evaluate_and_route(raw_candidate_str: str) -> Dict[str, Any]:
+    """Routes raw JSON strings or candidates through full verification for the salvage pipeline."""
+    try:
+        data = json.loads(raw_candidate_str) if isinstance(raw_candidate_str, str) else raw_candidate_str
+        code = data.get("code", "")
+        if not code and "solve_opt" in data:
+            code = f"{data.get('solve_opt', '')}\n\n{data.get('solve_brute', '')}\n\n{data.get('test_gen', '')}"
+
+        seed = data.get("seed", 42)
+        verified, ver_msg, failing_input = run_full_verification(code, seed=seed)
+
+        if verified:
+            return {"status": "APPROVED", "data": data, "message": ver_msg}
+        elif "AST Verification Failed" in ver_msg or "Security Policy Violation" in ver_msg:
+            return {"status": "QUARANTINE", "data": data, "reason": ver_msg, "failing_input": failing_input}
+        else:
+            return {"status": "REVIEW_QUEUE", "data": data, "reason": ver_msg, "failing_input": failing_input}
+    except Exception as e:
+        return {"status": "QUARANTINE", "data": {"raw": raw_candidate_str}, "reason": f"ParseException: {e}", "failing_input": None}

@@ -7,7 +7,7 @@ from verifier import run_full_verification
 
 
 def sanitize_traceback(tb_str: str) -> str:
-    """Strips absolute file paths and framework stack frames, handling single and double quotes cleanly."""
+    """Strips absolute file paths and framework stack frames."""
     lines = tb_str.strip().split("\n")
     sanitized = []
     for line in lines:
@@ -22,7 +22,7 @@ def sanitize_traceback(tb_str: str) -> str:
 def execute_retry_loop(
     paradigm: str, seed: int, max_retries: int = 3
 ) -> Tuple[bool, Optional[Dict[str, Any]], str]:
-    """Runs candidate generation with strict context resetting, failing input payload reporting, and a 3-attempt limit."""
+    """Runs generation retry loop with untruncated code context pass-through."""
     last_error = ""
     latest_code_attempt = ""
     last_failing_input = ""
@@ -41,7 +41,7 @@ def execute_retry_loop(
             parsed = parse_delimiters(raw_response)
             if not parsed["valid"]:
                 last_error = f"ParseError: {parsed['error']}"
-                latest_code_attempt = raw_response[:500]
+                latest_code_attempt = raw_response
                 last_failing_input = ""
                 continue
 
@@ -52,7 +52,6 @@ def execute_retry_loop(
             )
             latest_code_attempt = full_code
 
-            # Verification Engine Pass
             verified, ver_msg, failing_input = run_full_verification(full_code, seed=seed)
 
             if verified:
