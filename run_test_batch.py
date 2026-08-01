@@ -41,6 +41,37 @@ def run_batch_test(items_per_paradigm: int = 2):
     dedup_engine = CorpusBalanceEngine(max_per_paradigm=35, similarity_threshold=0.70)
     seed_counter = 42
 
+    # -----------------------------------------------------------------------
+    # Resume: pre-load previously approved entries so that a restart never
+    # duplicates work or reuses already-processed seeds.
+    # -----------------------------------------------------------------------
+    approved_path = "data/approved_curriculum.jsonl"
+    if os.path.exists(approved_path):
+        loaded = 0
+        max_seen_seed = seed_counter - 1
+        with open(approved_path, "r", encoding="utf-8") as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if not _line:
+                    continue
+                try:
+                    _entry = json.loads(_line)
+                    _paradigm = _entry.get("paradigm", "")
+                    _code = _entry.get("code", "")
+                    _seed = _entry.get("seed", -1)
+                    if _paradigm and _code:
+                        dedup_engine.register_candidate(_paradigm, _code)
+                        loaded += 1
+                    if isinstance(_seed, int) and _seed > max_seen_seed:
+                        max_seen_seed = _seed
+                except (json.JSONDecodeError, KeyError):
+                    pass
+        # Place seed_counter past the highest seed already written to disk.
+        seed_counter = max_seen_seed + 1
+        print(f"[RESUME] Pre-loaded {loaded} existing approved entries. "
+              f"Resuming from seed {seed_counter}.")
+    # -----------------------------------------------------------------------
+
     for paradigm_idx, paradigm in enumerate(PARADIGMS):
         print(f"\n[+] Processing Paradigm [{paradigm_idx + 1}/{len(PARADIGMS)}]: '{paradigm}'...")
 

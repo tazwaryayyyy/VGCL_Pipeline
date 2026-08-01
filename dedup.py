@@ -35,16 +35,18 @@ class ASTCanonicalizer(ast.NodeTransformer):
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
         old_in_func = self.in_function
-        old_local = self.local_mapping.copy()
+        old_local = self.local_mapping  # Keep reference to restore later.
         old_var_idx = self.var_idx
 
         self.in_function = True
-        self.local_mapping = {}
-        self.var_idx = 0  # Reset variable index for clean function-level scope
+        # Inherit outer scope bindings so closures resolve parent-bound names correctly.
+        self.local_mapping = self.local_mapping.copy()
+        self.var_idx = 0  # Reset variable index for clean function-level local scope.
 
         self._strip_docstring(node)
         self.generic_visit(node)
 
+        # Restore outer scope state on teardown.
         self.in_function = old_in_func
         self.local_mapping = old_local
         self.var_idx = old_var_idx

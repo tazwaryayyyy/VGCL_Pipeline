@@ -75,8 +75,8 @@ def _call_llm_with_backoff(system_prompt: str, user_prompt: str) -> str:
     """Calls Gemini API with failover across priority models for quota and model errors."""
     last_exception = ""
     for model in _MODEL_PRIORITY:
-        max_attempts = 2
-        base_delay = 2.0
+        max_attempts = 3    # 3 tries per model before failing over.
+        base_delay = 5.0    # 5s base; absorbs typical quota-reset windows.
 
         for attempt in range(max_attempts):
             try:
@@ -96,9 +96,15 @@ def _call_llm_with_backoff(system_prompt: str, user_prompt: str) -> str:
                 is_quota = any(kw in err_str for kw in ["429", "resource_exhausted", "quota", "rate limit"])
 
                 if is_quota and attempt < max_attempts - 1:
-                    time.sleep(base_delay + random.uniform(0, 1))
+                    sleep_s = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                    print(
+                        f"  [RATE-LIMIT] {model} quota hit (attempt {attempt + 1}/{max_attempts}). "
+                        f"Backing off {sleep_s:.1f}s ...",
+                        flush=True,
+                    )
+                    time.sleep(sleep_s)
                     continue
-                # Fail over to next model priority on persistent errors or non-429 exceptions
+                # Non-quota error or exhausted retries: fail over to next model.
                 break
 
     return f"LLM Generation Exception: All priority models failed. Last error: {last_exception}"

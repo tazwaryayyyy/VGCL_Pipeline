@@ -1,96 +1,61 @@
 # VGCL Pipeline
 
-VGCL Pipeline is a modular engine designed to generate, verify, and deduplicate competitive programming problems and code execution trajectories. It provides isolated verification, AST-based security checks, differential testing, and dynamic deduplication.
+A dataset generation pipeline for competitive programming problems. It prompts an LLM to write a problem spec, an optimized solution, a brute-force solution, and a test case generator, then verifies correctness before saving anything.
 
-## Features
+## How it works
 
-- **Robust LLM Parsing:** Fuzzy header extraction and handling for model output variations.
-- **Sandboxed Execution:** AST validation and process isolation to block forbidden imports, system access, and IPC pipe deadlocks.
-- **Differential Verification:** Cross-checks candidate solutions against brute-force implementations across scaled test inputs with float-safe comparison logic.
-- **AST Deduplication:** Canonicalized structural indexing and adaptive n-gram sliding windows to filter redundant code topology.
-- **Resilient Batch Processing:** Infrastructure rate-limit detection and exponential backoff to handle API quota limits without corrupting task status.
+1. **Generator** calls the Gemini API and parses the response into four blocks (spec, solve, brute, test generator).
+2. **Verifier** runs the code in a sandboxed subprocess. It checks AST security, then differentially tests `solve` vs `solve_brute` on small-scale inputs. Large-scale inputs only run `solve` against a time and memory budget.
+3. **Dedup engine** canonicalizes the AST and drops any candidate that is too similar to something already in the corpus.
+4. Approved candidates are appended to `data/approved_curriculum.jsonl` immediately with `fsync`. If the run is interrupted and restarted, the pipeline reads that file on startup, pre-populates the dedup corpus, and resumes from the next unused seed.
 
-## Pipeline Architecture
+## Files
 
-```text
-                   +-------------------+
-                   |   LLM Generator   |
-                   +---------+---------+
-                             |
-                             v
-                   +-------------------+
-                   |  Fuzzy Delimiter  |
-                   |      Parser       |
-                   +---------+---------+
-                             |
-                             v
-                   +-------------------+
-                   |   AST Security    |
-                   |     Verifier      |
-                   +---------+---------+
-                             |
-                             v
-                   +-------------------+
-                   | Differential Test |
-                   |  Execution (IPC)  |
-                   +---------+---------+
-                             |
-                             v
-                   +-------------------+
-                   |    AST Topology   |
-                   |   Deduplication   |
-                   +-------------------+
+```
+generator.py          LLM calls, delimiter parser, exponential backoff
+verifier.py           AST sandbox, differential execution, IPC worker processes
+dedup.py              AST canonicalization, Jaccard n-gram dedup
+runner.py             Retry loop with error pass-through to the LLM on retries
+run_test_batch.py     Main batch entrypoint, resume logic, paradigm caps
+smoke_test.py         Quick sanity check for IPC and security sandbox
+test_production_engine.py  Full test suite
+test_patch_targets.py      Unit tests for verifier and dedup patches
+data/
+  approved_curriculum.jsonl   Output dataset
+  quarantine/                 Failed or duplicate candidates
 ```
 
-## Repository Structure
-
-```text
-├── phase0_calibration/     # Calibration data scripts and trajectory extraction
-├── dedup.py                # AST canonicalization and Jaccard similarity engine
-├── generator.py            # Prompts, API rate limit handlers, and response parser
-├── runner.py               # Retry orchestrator and traceback sanitization
-├── verifier.py             # IPC process isolation and differential execution
-├── run_test_batch.py       # Production batch entrypoint across paradigms
-└── test_production_engine.py # Test suite and smoke tests
-```
-
-## Quickstart
-
-### Environment Setup
-
-1. Clone the repository and navigate to the root directory:
+## Setup
 
 ```bash
 git clone https://github.com/your-username/vgcl-pipeline.git
 cd vgcl-pipeline
-```
-
-2. Set up a virtual environment and activate it:
-
-```bash
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+.venv\Scripts\activate   # or: source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-3. Configure your API key in a `.env` file:
+Add a `.env` file:
 
-```env
-GEMINI_API_KEY=your_api_key_here
+```
+GEMINI_API_KEY=your_key_here
 ```
 
-### Execution
-
-Run the smoke test protocol to verify process isolation and security checks:
+## Running
 
 ```bash
+# Sanity check
 python smoke_test.py
-```
 
-Run the full batch generation and verification pipeline:
+# Full test suite
+python test_production_engine.py
 
-```bash
+# Batch generation (resumes automatically if data/approved_curriculum.jsonl exists)
 python run_test_batch.py
 ```
 
+Edit `items_per_paradigm` at the bottom of `run_test_batch.py` to control how many problems to generate per paradigm.
+
 ## License
+
 MIT

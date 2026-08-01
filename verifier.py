@@ -98,31 +98,39 @@ def _truncate_repr(obj: Any, max_len: int = 500) -> str:
 
 
 def _are_results_equal(a: Any, b: Any, rel_tol: float = 1e-6, abs_tol: float = 1e-6) -> bool:
-    """Type-strict differential equality check."""
-    if type(a) is not type(b):
-        if not (isinstance(a, (int, float)) and isinstance(b, (int, float))):
-            return False
-        if isinstance(a, bool) or isinstance(b, bool):
-            return False
+    """Type-aware differential equality check with NumPy scalar unwrapping and sequence coercion."""
+    # Step 1: Unwrap NumPy scalars (np.int64, np.float64, etc.) to native Python types.
+    if hasattr(a, "item"):
+        a = a.item()
+    if hasattr(b, "item"):
+        b = b.item()
 
-    if isinstance(a, float) or isinstance(b, float):
-        if math.isnan(a) and math.isnan(b):
-            return True
-        return math.isclose(a, b, rel_tol=rel_tol, abs_tol=abs_tol)
-
-    if isinstance(a, (int, float)):
-        return a == b
-
+    # Step 2: Sequence equivalence — list vs tuple are considered equivalent containers.
     if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
         if len(a) != len(b):
             return False
         return all(_are_results_equal(x, y, rel_tol, abs_tol) for x, y in zip(a, b))
+
+    # Step 3: Strict primitive type guard.
+    if type(a) is not type(b):
+        # Allow mixed int/float numerics, but never conflate bool with int (e.g. 1 vs True).
+        if isinstance(a, bool) or isinstance(b, bool):
+            return False
+        if not (isinstance(a, (int, float)) and isinstance(b, (int, float))):
+            return False
+
+    # Step 4: Float & NaN handling.
+    if isinstance(a, float) or isinstance(b, float):
+        if math.isnan(a) and math.isnan(b):
+            return True
+        return math.isclose(a, b, rel_tol=rel_tol, abs_tol=abs_tol)
 
     if isinstance(a, dict) and isinstance(b, dict):
         if a.keys() != b.keys():
             return False
         return all(_are_results_equal(a[k], b[k], rel_tol, abs_tol) for k in a)
 
+    # Step 5: Exact match fallback.
     return a == b
 
 
@@ -215,18 +223,36 @@ def _worker_exec_phase_a(code_str: str, seed: int, conn) -> None:
             pass_args = args if isinstance(args, (list, tuple)) else (args,)
             current_args = pass_args
 
-            ans_opt = solve(*copy.deepcopy(pass_args))
-            ans_brute = solve_brute(*copy.deepcopy(pass_args))
+            # Determine if any individual input element looks genuinely large-scale.
+            # Collection threshold: >= 10_000 items (e.g. arrays, strings, dicts).
+            # Scalar threshold: > 2_000_000_000 (2B).
+            #   Both canonical mod constants (1_000_000_007 and 998_244_353) are below
+            #   2B, so they receive full brute-force verification. Only iteration-space
+            #   scalars that would genuinely hang a Python loop (e.g. n=10^18) bypass it.
+            def _is_large_arg(a: object) -> bool:
+                if isinstance(a, (list, tuple, str, dict, set)) and len(a) >= 10_000:
+                    return True
+                if isinstance(a, (int, float)) and not isinstance(a, bool) and a > 2_000_000_000:
+                    return True
+                return False
 
-            if not _are_results_equal(ans_opt, ans_brute):
-                conn.send(
-                    (
-                        False,
-                        f"Phase A Mismatch on small test #{idx + 1}: Optimal={_truncate_repr(ans_opt)} vs Brute={_truncate_repr(ans_brute)}",
-                        _truncate_repr(pass_args),
+            _is_large = any(_is_large_arg(a) for a in pass_args)
+
+            ans_opt = solve(*copy.deepcopy(pass_args))
+
+            if not _is_large:
+                # Only run brute-force on small-scale inputs to avoid O(2^N) hangs.
+                ans_brute = solve_brute(*copy.deepcopy(pass_args))
+
+                if not _are_results_equal(ans_opt, ans_brute):
+                    conn.send(
+                        (
+                            False,
+                            f"Phase A Mismatch on small test #{idx + 1}: Optimal={_truncate_repr(ans_opt)} vs Brute={_truncate_repr(ans_brute)}",
+                            _truncate_repr(pass_args),
+                        )
                     )
-                )
-                return
+                    return
 
             mem_err = _check_peak_rss_limit()
             if mem_err:
@@ -356,6 +382,16 @@ def run_full_verification(code_str: str, seed: int = 42) -> Tuple[bool, str, Opt
 def evaluate_and_route(raw_candidate_str: str) -> Dict[str, Any]:
     """Routes raw JSON strings or candidates through full verification for the salvage pipeline."""
     try:
+        # Guard: if the string is a raw LLM generation failure message, quarantine it immediately
+        # without attempting JSON deserialization (which would raise a split/parse error).
+        if isinstance(raw_candidate_str, str) and raw_candidate_str.startswith("LLM Generation Exception:"):
+            return {
+                "status": "QUARANTINE",
+                "data": {"raw": raw_candidate_str},
+                "reason": raw_candidate_str,
+                "failing_input": None,
+            }
+
         data = json.loads(raw_candidate_str) if isinstance(raw_candidate_str, str) else raw_candidate_str
         code = data.get("code", "")
         if not code and "solve_opt" in data:
