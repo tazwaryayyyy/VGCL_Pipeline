@@ -1,6 +1,7 @@
 import os
 import random
 import time
+import re
 from typing import Any, Dict
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -118,39 +119,71 @@ def generate_candidate_raw(
     last_code: str = "",
     failing_input: str = "",
 ) -> str:
-    """Generates candidate code using full code context pass-through on retries."""
-    system_prompt_template = (
-        "You are an expert algorithmic problem designer. Generate a self-contained algorithmic problem, "
-        "including an optimal solution, canonical brute-force, and deterministic test generator.\n\n"
+    """Generates candidate algorithmic code packages using enforced system contracts."""
+
+    system_prompt = (
+        "You are a principal competitive programming problem architect. Your task is to design "
+        "a self-contained, mathematically sound algorithmic problem package.\n\n"
+        "### CRITICAL SYSTEM CONTRACTS (VIOLATION CAUSES HARD SYSTEM REJECTION)\n\n"
+        "1. FUNCTION SIGNATURE CONTRACT:\n"
+        "   - 'solve' and 'solve_brute' MUST accept the EXACT same positional arguments.\n"
+        "   - Example: If 'solve(grid, k)' takes 2 arguments, 'solve_brute(grid, k)' MUST take 2 arguments.\n"
+        "   - 'generate_test_cases(seed: int, scale: str)' MUST return a list of tuples, where EVERY tuple "
+        "matches the positional arguments of 'solve' 1-to-1.\n"
+        "   - NEVER return placeholder singletons like [(seed,)] or [seed]. Return real, fully formed input tuples.\n\n"
+        "2. TEST GENERATOR SCALE CONTRACT:\n"
+        "   - Line 1 of 'generate_test_cases' MUST be: random.seed(seed)\n"
+        "   - You MUST explicitly implement scale branching inside the code:\n"
+        "       if scale == 'small': generate cases where N is in [1, 15]\n"
+        "       elif scale == 'large': generate cases where N is in [10^4, 10^5]\n"
+        "   - Generate at least 5 distinct test tuples for scale='small' and scale='large'.\n\n"
+        "3. SOLVE VS BRUTE DIFFERENTIATION CONTRACT:\n"
+        "   - 'solve' MUST implement the optimal algorithm for the paradigm.\n"
+        "   - 'solve_brute' MUST implement a naive/brute-force approach (e.g., exponential search, "
+        "nested loops, or unoptimized recursion).\n"
+        "   - 'solve_brute' MUST NOT be a copy-paste or simple wrapper of 'solve'.\n\n"
+        "4. OUTPUT FORMAT CONTRACT:\n"
+        "   - Do NOT wrap response blocks in markdown triple backticks (```python ... ```).\n"
+        "   - Output EXACTLY four blocks using these exact section headers:\n\n"
         "### PROBLEM_SPEC\n"
-        "Target Paradigm: {paradigm}\n"
-        "Seed: {seed}\n\n"
-        "Description:\n<Problem description>\n\n"
-        "Input Constraints:\n- Small Scale: N in [1, 15]\n- Large Scale: N in [10^4, 10^5]\n\n"
+        "<Problem description, input/output formats, constraints>\n\n"
         "### SOLVE_OPTIMIZED\n"
-        "def solve(*args):\n    pass\n\n"
+        "def solve(...):\n"
+        "    ...\n\n"
         "### SOLVE_BRUTE\n"
-        "def solve_brute(*args):\n    pass\n\n"
+        "def solve_brute(...):\n"
+        "    ...\n\n"
         "### TEST_GENERATOR\n"
         "import random\n"
-        "def generate_test_cases(seed: int, scale: str) -> list:\n    pass\n"
+        "def generate_test_cases(seed: int, scale: str) -> list:\n"
+        "    ...\n"
     )
 
-    system_prompt = system_prompt_template.format(paradigm=paradigm, seed=seed)
-
     if attempt == 1:
-        user_prompt = f"Generate an algorithmic problem for paradigm '{paradigm}' using seed {seed}."
-    else:
         user_prompt = (
-            f"RETRY ATTEMPT {attempt}/3 FOR PARADIGM '{paradigm}'.\n"
-            f"Previous Error:\n{last_error}\n\n"
+            f"Target Paradigm: {paradigm}\n"
+            f"Seed: {seed}\n\n"
+            f"Generate a new problem package for '{paradigm}' matching all system contracts."
+        )
+    else:
+        # Truncate error payload if excessively long to protect context window
+        clean_error = last_error[-1500:] if len(last_error) > 1500 else last_error
+        
+        user_prompt = (
+            f"RETRY ATTEMPT {attempt}/3 FOR PARADIGM '{paradigm}' (Seed {seed}).\n\n"
+            f"YOUR PREVIOUS CODE FAILED THE AUDIT WITH THE FOLLOWING ERROR:\n"
+            f"--------------------------------------------------\n"
+            f"{clean_error}\n"
+            f"--------------------------------------------------\n\n"
         )
         if failing_input:
-            user_prompt += f"Failing Input Payload:\n{failing_input}\n\n"
+            user_prompt += f"Failing Test Case Input Payload:\n{failing_input}\n\n"
 
         user_prompt += (
-            f"Previous Complete Code Attempt:\n{last_code}\n\n"
-            f"Fix the defect and output ALL required blocks using the exact delimiter format."
+            f"Previous Defective Code Attempt:\n"
+            f"```\n{last_code}\n```\n\n"
+            f"Fix the bug causing the failure above. Ensure 'generate_test_cases' returns valid tuples "
+            f"matching 'solve' arguments and branches properly on scale='small' vs scale='large'."
         )
 
     return _call_llm_with_backoff(system_prompt, user_prompt)

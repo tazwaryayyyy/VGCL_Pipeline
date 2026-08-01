@@ -14,6 +14,7 @@ A dataset generation pipeline for competitive programming problems. It prompts a
 ```
 generator.py          LLM calls, delimiter parser, exponential backoff
 verifier.py           AST sandbox, differential execution, IPC worker processes
+audit_curriculum.py   Generate audit curriculum and compare with approved curriculum
 dedup.py              AST canonicalization, Jaccard n-gram dedup
 runner.py             Retry loop with error pass-through to the LLM on retries
 run_test_batch.py     Main batch entrypoint, resume logic, paradigm caps
@@ -49,6 +50,9 @@ python smoke_test.py
 
 # Full test suite
 python test_production_engine.py
+
+# Audit existing curriculum
+python audit_curriculum.py
 
 # Batch generation (resumes automatically if data/approved_curriculum.jsonl exists)
 python run_test_batch.py
