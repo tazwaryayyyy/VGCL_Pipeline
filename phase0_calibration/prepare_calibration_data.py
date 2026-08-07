@@ -1,6 +1,7 @@
 import json
 import re
 from pathlib import Path
+import yaml
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
@@ -45,42 +46,44 @@ def assign_heuristic_category(code_text: str) -> int:
         return 7  # General Algorithmic Logic
 
 
-def build_calibration_dataset(humaneval_path: str, output_path: str, target_count=500):
+def load_calibration_config(config_path: str = "phase0_calibration/config.yaml") -> dict:
+    """Loads explicit calibration dataset configuration."""
+    cfg_file = Path(config_path)
+    if not cfg_file.exists():
+        raise FileNotFoundError(f"Calibration config not found at: {config_path}")
+    with open(cfg_file, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def build_calibration_dataset(
+    config_path: str = "phase0_calibration/config.yaml",
+    output_path: str = "data/raw_calibration.json"
+):
+    """
+    Builds calibration dataset guaranteeing:
+    Calibration ∩ Training ∩ Evaluation = empty (Disjoint Calibration Invariant)
+    """
+    cfg = load_calibration_config(config_path)
+    cal_cfg = cfg["calibration_dataset"]
+
+    dataset_name = cal_cfg["name"]
+    dataset_split = cal_cfg["split"]
+    dataset_version = cal_cfg.get("version", "sanitized")
+    target_count = cal_cfg.get("target_count", 500)
+
+    print(f"Loading DISJOINT calibration split '{dataset_split}' from {dataset_name} ({dataset_version})...")
+    
+    # Load disjoint MBPP split (e.g. 'train' or 'prompt', strictly NOT 'test')
+    mbpp_cal_ds = load_dataset(dataset_name, dataset_version, split=dataset_split)
+
     calibration_items = []
-
-    # 1. Process HumanEval
-    print(f"Loading HumanEval from {humaneval_path}...")
-    with open(humaneval_path, "r", encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            item = json.loads(line)
-            sol = item.get("canonical_solution", "")
-
-            calibration_items.append({
-                "source": "HumanEval",
-                "task_id": item["task_id"],
-                "prompt": item["prompt"],
-                "target_token": extract_first_token(sol),
-                "human_category_id": assign_heuristic_category(sol),
-                "canonical_solution": sol
-            })
-
-    print(f"Loaded {len(calibration_items)} problems from HumanEval.")
-
-    # 2. Process MBPP from Hugging Face
-    needed = target_count - len(calibration_items)
-    print(f"Fetching MBPP dataset to fulfill remaining {needed} problems...")
-
-    # Load sanitized MBPP split
-    mbpp_ds = load_dataset("google-research-datasets/mbpp",
-                           "sanitized", split="test")
-
-    for idx, item in enumerate(mbpp_ds):
+    for idx, item in enumerate(mbpp_cal_ds):
         sol = item.get("code", "")
+        task_id = f"MBPP_CALIB/{item['task_id']}"
+
         calibration_items.append({
-            "source": "MBPP",
-            "task_id": f"MBPP/{item['task_id']}",
+            "source": f"MBPP_{dataset_split.upper()}",
+            "task_id": task_id,
             "prompt": item["prompt"],
             "target_token": extract_first_token(sol),
             "human_category_id": assign_heuristic_category(sol),
@@ -90,7 +93,7 @@ def build_calibration_dataset(humaneval_path: str, output_path: str, target_coun
         if len(calibration_items) >= target_count:
             break
 
-    # Save finalized standard dataset
+    # Save finalized disjoint calibration dataset
     out_file = Path(output_path)
     out_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -98,13 +101,12 @@ def build_calibration_dataset(humaneval_path: str, output_path: str, target_coun
         json.dump(calibration_items, f, indent=2)
 
     print(
-        f"Successfully generated {len(calibration_items)} calibration problems at: {out_file.resolve()}")
+        f"Successfully generated {len(calibration_items)} DISJOINT calibration problems at: {out_file.resolve()}"
+    )
 
 
 if __name__ == "__main__":
-    # Adjust path if your human eval file is named differently (e.g. human-eval.jsonl)
     build_calibration_dataset(
-        humaneval_path="data/human-eval.jsonl",
-        output_path="data/raw_calibration.json",
-        target_count=500
+        config_path="phase0_calibration/config.yaml",
+        output_path="data/raw_calibration.json"
     )

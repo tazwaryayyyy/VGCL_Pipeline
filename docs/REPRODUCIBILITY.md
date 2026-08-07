@@ -15,6 +15,7 @@ Central Hypothesis:
 4. **Structural Novelty**: Accepted curriculum samples MUST satisfy $S_{\text{AST/CFG}} < 0.70$ against all existing problems in the corpus.
 5. **Controlled Comparison**: The targeted and uniform control pipelines differ **ONLY** in curriculum targeting strategy. Generator model, prompts, verifier, deduplication, ledger schema, rate control, fine-tuning hyperparameters, and evaluation suites are identical.
 6. **Statistical Validity**: Evaluation is cluster-level, pre-registered, and reported as $\mu \pm \sigma$ across 3 fixed random seeds (Seeds: 42, 1337, 2026).
+7. **Dataset Separation**: Calibration samples are drawn strictly from disjoint data splits (`google-research-datasets/mbpp`, config: `sanitized`, split: `train`), guaranteeing $\text{Calibration} \cap \text{Training} \cap \text{Evaluation} = \emptyset$. Benchmark evaluation sets (HumanEval, MBPP `test`) are strictly excluded from calibration. Artifact versioning enforces retirement of legacy contaminated calibration datasets to `data/archive/contaminated_calibration_v1/`.
 
 ---
 

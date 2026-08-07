@@ -1,0 +1,14 @@
+calibration_dataset:
+  name: "google-research-datasets/mbpp"
+  split: "train"
+  version: "sanitized"
+  target_count: 500
+
+evaluation_dataset:
+  benchmarks:
+    - name: "HumanEval"
+      split: "test"
+      file: "data/human-eval.jsonl"
+    - name: "google-research-datasets/mbpp"
+      split: "test"
+      version: "sanitized"

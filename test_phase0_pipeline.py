@@ -135,6 +135,19 @@ class TestPhase0Pipeline(unittest.TestCase):
         with self.assertRaises(ValueError):
             mapper.verify_no_evaluation_leakage(["TRAIN_PROB_001", "EVAL_PROB_002"])
 
+    def test_calibration_dataset_leakage_guard(self):
+        import json
+        raw_calib_path = "data/raw_calibration.json"
+        if os.path.exists(raw_calib_path):
+            with open(raw_calib_path, "r", encoding="utf-8") as f:
+                calib_data = json.load(f)
+            calib_ids = {item["task_id"] for item in calib_data}
+            # Enforce zero HumanEval IDs or MBPP test IDs in calibration set
+            humaneval_in_calib = [tid for tid in calib_ids if "HumanEval" in tid or tid.startswith("HumanEval/")]
+            mbpp_test_in_calib = [tid for tid in calib_ids if tid.startswith("MBPP/")]
+            self.assertEqual(len(humaneval_in_calib), 0, f"HumanEval problems found in calibration set: {humaneval_in_calib}")
+            self.assertEqual(len(mbpp_test_in_calib), 0, f"MBPP test problems found in calibration set: {mbpp_test_in_calib}")
+
     def test_transfer_matrix(self):
         calc = TransferMatrixCalculator()
         clusters = calc.clusters

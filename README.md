@@ -14,7 +14,9 @@ The current Phase 0 implementation includes:
 
 - deterministic failure attribution
 - isolated oracle generation
-- evaluation leakage checks
+- strict evaluation leakage checks ($\text{Calibration} \cap \text{Training} \cap \text{Evaluation} = \emptyset$)
+- explicit dataset configuration (`phase0_calibration/config.yaml`) using MBPP `train` for calibration
+- legacy contaminated calibration artifacts safely retired (`data/archive/contaminated_calibration_v1/`)
 - cluster exposure auditing
 - matched targeted and uniform control pipelines
 
