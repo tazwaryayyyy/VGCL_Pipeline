@@ -1,65 +1,98 @@
-# VGCL Pipeline
+# Verification-Guided Curriculum Learning (VGCL) Phase 0
 
-A dataset generation pipeline for competitive programming problems. It prompts an LLM to write a problem spec, an optimized solution, a brute-force solution, and a test case generator, then verifies correctness before saving anything.
+## Project Overview
 
-## How it works
+VGCL is an experimental framework for constructing synthetic training curricula targeted at the measured empirical failure modes of a base language model. Rather than generating synthetic training samples uniformly or via arbitrary topic heuristics, VGCL measures execution-grounded failure clusters of a fixed base model ($\theta_{\text{base}}$), synthesizes curriculum datasets designed to address those specific failure modes, and verifies candidate correctness through a two-phase differential verification oracle.
 
-1. **Generator** calls the Gemini API and parses the response into four blocks (spec, solve, brute, test generator).
-2. **Verifier** runs the code in a sandboxed subprocess. It checks AST security, then differentially tests `solve` vs `solve_brute` on small-scale inputs. Large-scale inputs only run `solve` against a time and memory budget.
-3. **Dedup engine** canonicalizes the AST and drops any candidate that is too similar to something already in the corpus.
-4. Approved candidates are appended to `data/approved_curriculum.jsonl` immediately with `fsync`. If the run is interrupted and restarted, the pipeline reads that file on startup, pre-populates the dedup corpus, and resumes from the next unused seed.
+## Scientific Hypothesis
 
-## Files
+**Failure-targeted verified synthetic curricula produce greater capability transfer than uniformly sampled verified synthetic curricula under identical compute budgets.**
+
+## Phase 0 Experimental Safeguards
+
+The current Phase 0 implementation includes:
+
+- deterministic failure attribution
+- isolated oracle generation
+- evaluation leakage checks
+- cluster exposure auditing
+- matched targeted and uniform control pipelines
+
+This repository version is frozen for Phase 0 experiments.
+
+## Pipeline Diagram
 
 ```
-generator.py          LLM calls, delimiter parser, exponential backoff
-verifier.py           AST sandbox, differential execution, IPC worker processes
-audit_curriculum.py   Generate audit curriculum and compare with approved curriculum
-dedup.py              AST canonicalization, Jaccard n-gram dedup
-runner.py             Retry loop with error pass-through to the LLM on retries
-run_test_batch.py     Main batch entrypoint, resume logic, paradigm caps
-smoke_test.py         Quick sanity check for IPC and security sandbox
-test_production_engine.py  Full test suite
-test_patch_targets.py      Unit tests for verifier and dedup patches
-data/
-  approved_curriculum.jsonl   Output dataset
-  quarantine/                 Failed or duplicate candidates
+Base Model Probing (failure_mapper.py)
+            │
+            ▼
+Deterministic Failure Attribution (FC_01...FC_08)
+            │
+  ┌─────────┴─────────┐
+  ▼                   ▼
+Targeted Generation   Uniform Control Generation
+(targeted_gen.py)     (uniform_gen.py)
+  │                   │
+  └─────────┬─────────┘
+            ▼
+Two-Phase Verification Oracle (oracle_refactor.py)
+            │
+            ▼
+Structural Deduplication AST + CFG (cfg_dedup.py)
+            │
+            ▼
+Experiment Ledger (experiment_ledger.py)
+            │
+            ▼
+Cluster-Level Transfer Matrix (transfer_matrix.py)
+            │
+            ▼
+Statistical Analysis & Significance Testing (statistical_analysis.py)
 ```
 
-## Setup
+## Installation
 
 ```bash
 git clone https://github.com/your-username/vgcl-pipeline.git
 cd vgcl-pipeline
 python -m venv .venv
-.venv\Scripts\activate   # or: source .venv/bin/activate
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Add a `.env` file:
-
+Set environment variable in `.env`:
+```env
+GEMINI_API_KEY=your_api_key
 ```
-GEMINI_API_KEY=your_key_here
-```
 
-## Running
+## Running Phase 0
 
 ```bash
-# Sanity check
-python smoke_test.py
+# 1. Base model failure attribution
+python failure_mapper.py
 
-# Full test suite
-python test_production_engine.py
+# 2. Targeted curriculum generation
+python targeted_generation.py --target-failure-cluster FC_01_MICRO_CORRECTNESS --num-samples 50
 
-# Audit existing curriculum
-python audit_curriculum.py
+# 3. Uniform control generation
+python uniform_generation.py --num-samples 50
 
-# Batch generation (resumes automatically if data/approved_curriculum.jsonl exists)
-python run_test_batch.py
+# 4. Capability transfer analysis
+python transfer_matrix.py
+
+# 5. Statistical hypothesis evaluation
+python statistical_analysis.py
+
+# 6. Run full integration test suite
+python -m unittest test_phase0_pipeline.py
 ```
 
-Edit `items_per_paradigm` at the bottom of `run_test_batch.py` to control how many problems to generate per paradigm.
+## Experimental Controls
 
-## License
+- **Targeted Pipeline (`targeted_generation.py`)**: Prompts candidate problems targeted specifically at empirical execution failure clusters (`FC_01`..`FC_08`).
+- **Uniform Control Pipeline (`uniform_generation.py`)**: Identical generator model, decoupled 2-pass oracle, deduplication, ledger schema, and rate control, differing **only** by sampling uniformly across failure categories without failure targeting.
 
-MIT
+## Documentation & Auditing
+
+- [Migration Guide](docs/MIGRATION.md)
+- [Reproducibility Protocol](docs/REPRODUCIBILITY.md)

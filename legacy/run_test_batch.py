@@ -159,4 +159,4 @@ def run_batch_test(items_per_paradigm: int = 2):
 
 
 if __name__ == "__main__":
-    run_batch_test(items_per_paradigm=1)
+    run_batch_test(items_per_paradigm=10)
