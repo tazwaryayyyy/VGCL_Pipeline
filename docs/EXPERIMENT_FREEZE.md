@@ -1,21 +1,20 @@
 # VGCL Phase 0 Experiment Freeze
 
-## Freeze Metadata
-
 Freeze version:
+phase0-experiment-freeze-v2
+
+Previous freeze:
 phase0-experiment-freeze-v1
 
-Freeze commit:
-312a6c5d9ce00d208d7f412e642ea33bcc5a8253
+Reason for revision:
+Calibration leakage was discovered after v1 freeze.
+HumanEval and MBPP test data were removed from calibration.
 
-Freeze date:
-2026-08-07
+Current commit:
+139ecd578cc17aa3c9ecead032d23c16a3071bc7
 
-Repository:
-VGCL_Pipeline
-
-
-## Models
+Date:
+2026-08-08
 
 Base model:
 Qwen-2.5-1.5B-Instruct
@@ -23,44 +22,18 @@ Qwen-2.5-1.5B-Instruct
 Generator model:
 Gemini-3.6-Flash
 
+Calibration dataset:
+MBPP train split only
 
-## Pipeline
+Evaluation datasets:
+HumanEval
+MBPP test
 
-Experiment:
-Verification-Guided Curriculum Learning (VGCL) Phase 0
+Dataset separation:
+Calibration ∩ Training ∩ Evaluation = empty
 
-
-## Experimental Conditions
-
-Target condition:
-
-Failure-targeted verified synthetic curriculum generation.
-
-
-Control condition:
-
-Uniform verified synthetic curriculum generation.
-
-
-## Verification
-
-Oracle:
-
-Two-phase differential verification.
-
-Phase A:
-Small-input brute-force correctness verification.
-
-Phase B:
-Large-input optimized execution constraint verification.
-
-
-## Training Configuration
-
-Method:
-LoRA fine-tuning
-
-Rank:
+Training configuration:
+LoRA rank:
 16
 
 Alpha:
@@ -72,24 +45,8 @@ Learning rate:
 Seeds:
 42, 1337, 2026
 
+Verification:
+Two-phase differential oracle
 
-## Evaluation
-
-Primary metric:
-
-Cluster-specific Pass@1 improvement.
-
-
-Secondary metrics:
-
-- Transfer matrix M(k,j)
-- Overall Pass@1
-- Pass@10
-- Cross-cluster transfer
-
-
-## Status
-
-Repository frozen for Phase 0 experimental execution.
-
-Dataset generation and training have not started yet.
+Status:
+Frozen for Phase 0 experiment execution
