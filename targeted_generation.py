@@ -26,7 +26,12 @@ from cfg_dedup import StructuralDeduplicationEngine
 from experiment_ledger import ExperimentLedger, LedgerEntry
 from oracle_refactor import VerificationOracle
 from pipeline_metrics import PipelineMetrics
-from syntax_repair import check_and_repair
+from quality_gates import check_reference_independence, validate_subtype
+from syntax_repair import (
+    check_and_repair,
+    identify_malformed_component,
+    regenerate_syntax_component,
+)
 
 load_dotenv()
 
@@ -478,7 +483,7 @@ def run_targeted_generation_pipeline(
 
             metrics.record_attempt(subtype=subtype, cluster=target_cluster)
             metrics.record_gen_latency(latency)
-            metrics.record_api_calls(api_calls)
+            metrics.record_initial_generation_api_calls(api_calls)
 
             print(
                 f"\n[+] Processing Sample [{accepted + 1}/{num_samples}] "
@@ -496,20 +501,95 @@ def run_targeted_generation_pipeline(
             )
             prompt_hash = hashlib.sha256(blocks["spec"].encode("utf-8")).hexdigest()[:16]
 
+            # 0. Pre-oracle syntax validation + controlled 1-shot component retry
             syn_diag, full_code = check_and_repair(full_code)
             if not syn_diag.passed:
-                print(
-                    f"  [X] Syntax Validation Failed [{syn_diag.error_category}] "
-                    f"(line {syn_diag.error_line}): {syn_diag.error_msg[:120]}"
-                )
-                metrics.record_syntax_failure()
-                scheduler.record_outcome(subtype, approved=False)
-                continue
+                malformed_comp, comp_diag = identify_malformed_component(blocks)
+                if malformed_comp:
+                    err_msg = comp_diag.error_msg if comp_diag else syn_diag.error_msg
+                    print(f"  [~] Syntax Failure in '{malformed_comp}'. Attempting 1-shot component regeneration...")
+                    retry_ok, new_blocks, retry_prov, retry_calls = regenerate_syntax_component(
+                        component_name=malformed_comp,
+                        blocks=blocks,
+                        cluster_id=target_cluster,
+                        subtype=subtype,
+                        seed=b_seed_val,
+                        llm_caller=_call_llm_paced,
+                        original_error=err_msg,
+                    )
+                    metrics.record_syntax_retry_api_calls(retry_calls)
+                    if retry_ok:
+                        blocks = new_blocks
+                        full_code = f"{blocks['solve_opt']}\n\n{blocks['solve_brute']}\n\n{blocks['test_gen']}"
+                        syn_diag, full_code = check_and_repair(full_code)
+                        if syn_diag.passed:
+                            metrics.record_syntax_retry_success()
+                            print(f"  [✓] Syntax Retry Succeeded for component '{malformed_comp}'")
+
+                if not syn_diag.passed:
+                    print(
+                        f"  [X] Syntax Validation Failed [{syn_diag.error_category}] "
+                        f"(line {syn_diag.error_line}): {syn_diag.error_msg[:120]}"
+                    )
+                    oracle.quarantine(
+                        seed=b_seed_val,
+                        prompt_hash=prompt_hash,
+                        generator_model=model_name,
+                        generator_version="v1.0",
+                        optimized_code=blocks.get("solve_opt", ""),
+                        reference_code=blocks.get("solve_brute", ""),
+                        test_generator_code=blocks.get("test_gen", ""),
+                        quarantine_reason=f"Syntax Failure: {syn_diag.error_category} ({syn_diag.error_msg[:100]})",
+                    )
+                    metrics.record_syntax_failure()
+                    scheduler.record_outcome(subtype, approved=False)
+                    continue
 
             if syn_diag.repaired:
                 print(f"  [~] Syntax Repair Applied: {syn_diag.repair_applied}")
                 metrics.record_syntax_repair()
 
+            # 1. Reference Structural-Independence Gate
+            ref_ind = check_reference_independence(blocks["solve_opt"], blocks["solve_brute"])
+            if ref_ind["status"] == "REJECT":
+                print(
+                    f"  [X] Reference Independence Failed (Similarity {ref_ind['similarity_score']} >= {ref_ind['threshold']}): {ref_ind['reason']}"
+                )
+                oracle.quarantine(
+                    seed=b_seed_val,
+                    prompt_hash=prompt_hash,
+                    generator_model=model_name,
+                    generator_version="v1.0",
+                    optimized_code=blocks.get("solve_opt", ""),
+                    reference_code=blocks.get("solve_brute", ""),
+                    test_generator_code=blocks.get("test_gen", ""),
+                    quarantine_reason=f"Reference Independence Violation: {ref_ind['reason']} (Score: {ref_ind['similarity_score']})",
+                    execution_traces={"reference_independence": ref_ind},
+                )
+                metrics.record_reference_independence_rejection()
+                scheduler.record_outcome(subtype, approved=False)
+                continue
+
+            # 2. Subtype Validity Gate
+            st_val = validate_subtype(subtype, blocks["spec"], blocks["solve_opt"])
+            if st_val["status"] == "REJECT":
+                print(f"  [X] Subtype Validation Failed for '{subtype}': {st_val['reason']}")
+                oracle.quarantine(
+                    seed=b_seed_val,
+                    prompt_hash=prompt_hash,
+                    generator_model=model_name,
+                    generator_version="v1.0",
+                    optimized_code=blocks.get("solve_opt", ""),
+                    reference_code=blocks.get("solve_brute", ""),
+                    test_generator_code=blocks.get("test_gen", ""),
+                    quarantine_reason=f"Subtype Validation Violation: {st_val['reason']} (Checks: {', '.join(st_val['checks'])})",
+                    execution_traces={"subtype_validation": st_val},
+                )
+                metrics.record_subtype_rejection()
+                scheduler.record_outcome(subtype, approved=False)
+                continue
+
+            # 3. Verification Oracle (Phase A Complexity-Aware Scaling + Phase B)
             metrics.record_oracle_attempt()
             ver_t0 = time.perf_counter()
             ver_res = oracle.verify(
@@ -525,8 +605,13 @@ def run_targeted_generation_pipeline(
 
             if ver_res["phase_a_pass"]:
                 metrics.record_phase_a_pass()
+            else:
+                metrics.record_phase_a_failure()
+
             if ver_res["phase_b_pass"]:
                 metrics.record_phase_b_pass()
+            elif ver_res["phase_a_pass"]:
+                metrics.record_phase_b_failure()
 
             if not ver_res["verified"]:
                 print(
@@ -536,6 +621,7 @@ def run_targeted_generation_pipeline(
                 scheduler.record_outcome(subtype, approved=False)
                 continue
 
+            # 4. Structural Corpus Deduplication
             problem_id = f"PROB_TGT_{target_cluster}_{b_seed_val}"
             dedup_res = dedup.register_candidate(problem_id, full_code)
             if dedup_res.is_duplicate:

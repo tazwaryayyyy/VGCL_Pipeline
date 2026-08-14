@@ -20,6 +20,8 @@ import traceback
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from quality_gates import case_within_phase_a_policy, derive_phase_a_scale_policy
+
 try:
     import resource
 except ImportError:
@@ -191,7 +193,23 @@ def _worker_phase_a(code_str: str, seed: int, conn) -> None:
         solve_brute = exec_globals["solve_brute"]
         gen_cases = exec_globals["generate_test_cases"]
 
-        test_cases = gen_cases(seed=seed, scale="small")[:20]
+        phase_a_scale = derive_phase_a_scale_policy(code_str)
+        raw_cases = gen_cases(seed=seed, scale="small")[:20]
+        test_cases = [
+            args for args in raw_cases
+            if case_within_phase_a_policy(args, phase_a_scale)
+        ]
+        if not test_cases:
+            conn.send({
+                "passed": False,
+                "reason": "Phase A Scale Policy Rejected: no generated small cases within brute-force dimension cap",
+                "failing_input": None,
+                "expected_output": None,
+                "actual_output": None,
+                "pass_count": 0,
+                "phase_a_scale": phase_a_scale,
+            })
+            return
         pass_count = 0
 
         for idx, args in enumerate(test_cases):
@@ -209,6 +227,7 @@ def _worker_phase_a(code_str: str, seed: int, conn) -> None:
                     "expected_output": _truncate_val(ans_brute),
                     "actual_output": _truncate_val(ans_opt),
                     "pass_count": pass_count,
+                    "phase_a_scale": phase_a_scale,
                 })
                 return
 
@@ -221,11 +240,17 @@ def _worker_phase_a(code_str: str, seed: int, conn) -> None:
                     "expected_output": None,
                     "actual_output": None,
                     "pass_count": pass_count,
+                    "phase_a_scale": phase_a_scale,
                 })
                 return
             pass_count += 1
 
-        conn.send({"passed": True, "reason": "Phase A Passed", "pass_count": pass_count})
+        conn.send({
+            "passed": True,
+            "reason": "Phase A Passed",
+            "pass_count": pass_count,
+            "phase_a_scale": phase_a_scale,
+        })
     except Exception as e:
         tb = traceback.format_exc()
         conn.send({
@@ -235,6 +260,7 @@ def _worker_phase_a(code_str: str, seed: int, conn) -> None:
             "expected_output": None,
             "actual_output": None,
             "pass_count": 0,
+            "phase_a_scale": derive_phase_a_scale_policy(code_str),
         })
 
 
@@ -459,6 +485,7 @@ class VerificationOracle:
             "parse_failure_location": parse_failure_location,
             "phase_a_mismatch_type": phase_a_mismatch,
             "phase_b_failure": phase_b_failure,
+            "phase_a_scale": (res_a or {}).get("phase_a_scale"),
             "is_timeout": is_timeout,
             "is_memory": is_memory,
             "is_duplicate": False,   # dedup is caller-side; always False here
@@ -560,6 +587,7 @@ class VerificationOracle:
                 "phase_b_pass": False,
                 "reason": reason,
                 "quarantine_id": art_id,
+                "phase_a_scale": res_a.get("phase_a_scale") if res_a else None,
                 "rejection_diagnostics": self._build_rejection_diagnostics(
                     reason=reason, res_a=res_a
                 ),
@@ -608,6 +636,7 @@ class VerificationOracle:
                 "phase_b_pass": False,
                 "reason": reason,
                 "quarantine_id": art_id,
+                "phase_a_scale": res_a.get("phase_a_scale"),
                 "rejection_diagnostics": self._build_rejection_diagnostics(
                     reason=reason, res_a=res_a, res_b=res_b
                 ),
@@ -621,11 +650,13 @@ class VerificationOracle:
             "phase_b_pass": True,
             "reason": "VERIFICATION_SUCCESS",
             "quarantine_id": None,
+            "phase_a_scale": res_a.get("phase_a_scale"),
             "rejection_diagnostics": {
                 "syntax_category": "none",
                 "parse_failure_location": None,
                 "phase_a_mismatch_type": "none",
                 "phase_b_failure": "none",
+                "phase_a_scale": res_a.get("phase_a_scale"),
                 "is_timeout": False,
                 "is_memory": False,
                 "is_duplicate": False,

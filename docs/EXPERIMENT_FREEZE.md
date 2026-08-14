@@ -69,3 +69,69 @@ The pre-oracle syntax stage performs parse validation plus markdown-fence and tr
 
 Benchmark status:
 No real Gemini throughput result is frozen here. Local mocked benchmarking validates batching mechanics only and must not be reported as API throughput.
+
+Scientific Quality Gates addendum:
+Date:
+2026-08-15
+
+Scope:
+Four surgical scientific corrections:
+1. Optimized/reference structural independence gate (threshold 0.85 near-isomorphism rejection).
+2. Deterministic subtype validity gate (Types A–F structural AST checks, NOT_VALIDATABLE for unstratified identifiers).
+3. Complexity-aware Phase A scaling (adaptive N<=5 bound for pathological brute solvers).
+4. Controlled 1-shot component-level syntax failure regeneration with explicit retry accounting.
+
+Status:
+Verified and frozen with full test suite passing (30 tests).
+
+---
+
+# Freeze Revision: phase0-experiment-freeze-v3
+
+Freeze version:
+phase0-experiment-freeze-v3
+
+Previous freeze:
+phase0-experiment-freeze-v2
+
+Reason for revision:
+Final adversarial validation and freeze of scientific quality gates (reference independence, subtype validity, complexity-aware Phase A scaling, 1-shot syntax component regeneration, retry metrics accounting, and generator model policy).
+
+Commit:
+Validated state on main branch
+
+Date:
+2026-08-15
+
+Base model:
+Qwen-2.5-1.5B-Instruct
+
+Generator model policy:
+Primary: gemini-3.6-flash
+Fallback priority: [gemini-3.6-flash, gemini-3.1-flash-lite, gemini-3.5-flash-lite, gemini-flash-latest]
+Enforcement: Model identity recorded per-call in quarantine and ledger entries; identical priority order across targeted and uniform pipelines.
+
+Calibration dataset:
+MBPP train split only (disjoint from evaluation sets)
+
+Evaluation datasets:
+HumanEval, MBPP test
+
+Quality Gates & Verification:
+1. Pre-oracle syntax validation with 1-shot component-level LLM regeneration retry.
+2. Optimized/reference structural independence gate (0.85 normalized AST n-gram similarity threshold, AST/CFG shape isomorphism check).
+3. Subtype validity gate (deterministic AST evidence for Types A–F; NOT_VALIDATABLE for uniform/unstratified identifiers).
+4. Two-phase differential verification oracle with complexity-aware Phase A scaling (N<=5 for recursive/combinatorial brute; N<=8 default) and Phase B (N>=100).
+5. Structural corpus deduplication (AST/CFG similarity < 0.70).
+6. Permanent quarantine protocol with structured rejection diagnostics.
+
+Accounting & Metrics:
+Separate accounting for initial generation API calls, syntax retry API calls, total API calls, syntax failures, syntax repairs, syntax retry successes, reference independence rejections, subtype rejections, Phase A/B passes and failures, deduplication rejections, and approvals.
+
+Test Status:
+30 integration tests passing (0 failures, 0 errors).
+py_compile: passed.
+git diff --check: passed.
+
+Repository status:
+Frozen for Phase 0 curriculum generation.

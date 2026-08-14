@@ -29,7 +29,25 @@ Concurrency is limited to candidate generation. Verification oracle execution, s
 
 Seeds are assigned before generation workers are submitted. This provides seed determinism and deterministic result ordering. It does not imply that adaptive-policy trajectories are identical for every `batch_size`: when `batch_size > 1`, subtype choices for the batch are made before observing within-batch outcomes. The targeted scheduler therefore reserves planned accepted-count slots before dispatch and restricts approval-weighted sampling to subtypes tied for the lowest accepted count. Approval feedback can change attempt ordering within tied strata, but it must not let easy-to-generate subtypes overtake the accepted curriculum allocation.
 
-The pre-oracle syntax stage is a normalization gate, not a semantic repair system. It validates `ast.parse()` in process, strips leading/trailing markdown code fences and trailing whitespace when needed, and revalidates. It does not change algorithmic logic, identifiers, control flow, or oracle criteria. If normalization fails, the candidate is rejected before oracle submission.
+The pre-oracle syntax stage is a normalization gate, not a semantic repair system. It validates `ast.parse()` in process, strips leading/trailing markdown code fences and trailing whitespace when needed, and revalidates. It does not change algorithmic logic, identifiers, control flow, or oracle criteria. If normalization fails, the candidate undergoes at most one component-level syntax regeneration retry. If it still fails, it is quarantined.
+
+## II.A. Four Surgical Scientific Quality Gates
+
+1. **Optimized/Reference Structural Independence Gate (`quality_gates.py`)**:
+   - **Method**: Isolated normalized AST n-gram token similarity between `solve` and `solve_brute`.
+   - **Threshold**: Deterministic $0.85$ near-isomorphism threshold (stricter than dataset deduplication $0.70$ because both functions address the same problem specification).
+   - **Rejection Action**: Candidates with identical AST/CFG shape or similarity $\ge 0.85$ are quarantined with full diagnostic provenance without oracle execution.
+2. **Subtype Validity Gate (`quality_gates.py`)**:
+   - **Method**: Deterministic AST structural feature checks (data structures, loop depths, recursion, operation patterns) validating that candidate problems instantiate declared curriculum subtypes (`Type A` through `Type F`).
+   - **Rejection Action**: Candidates lacking required structural features are quarantined (`status: REJECT`). Unrecognized subtypes return `NOT_VALIDATABLE` without mutating candidates.
+3. **Complexity-Aware Phase A Scaling (`oracle_refactor.py`)**:
+   - **Method**: Derives dimension limits from observable brute-force solver AST features.
+   - **Scale Policy**: Pathological brute solvers (recursion, loop depth $\ge 3$, or `itertools` combinatorial calls) receive a conservative bound ($N \le 5$, `pathological_bruteforce_cap`). Standard solvers retain $N \le 8$ (`default_small_scale`).
+   - **Invariant**: Preserves differential verification without skipping Phase A or inflating timeouts.
+4. **Controlled 1-Shot Syntax Component Regeneration (`syntax_repair.py`)**:
+   - **Method**: Pinpoints the single malformed component (`solve_opt`, `solve_brute`, or `test_gen`) and executes at most one targeted regeneration prompt.
+   - **Constraints**: Problem spec, target cluster, subtype, seed lineage, and valid components are immutable.
+   - **Accounting**: Distinguishes `initial_generation_api_calls` and `syntax_retry_api_calls`. Total API calls = initial + retries.
 
 Metrics are defined as follows:
 
@@ -41,6 +59,20 @@ Metrics are defined as follows:
 - `api_calls_per_approved = api_calls / approved`
 - `approval_rate_by_subtype = approved_subtype / attempted_subtype`
 - `approval_rate_by_cluster = approved_cluster / attempted_cluster`
+
+Granular diagnostic metric counters include:
+- `generation_attempts`
+- `initial_generation_api_calls`
+- `syntax_retry_api_calls`
+- `total_generation_api_calls`
+- `syntax_failures`
+- `syntax_retry_successes`
+- `reference_independence_rejections`
+- `subtype_rejections`
+- `phase_a_failures`
+- `phase_b_failures`
+- `dedup_rejections`
+- `approved`
 
 Throughput benchmarks must use disposable outputs and report actual measured wall-clock time, API calls, attempts, pass rates, deduplication rejections, accepted candidates, approved candidates per minute, approved candidates per API call, and mean generation/verification latencies. Mock benchmarks may validate local batching mechanics, but they are not evidence of real Gemini API throughput.
 
@@ -128,3 +160,18 @@ All model fine-tuning experiments MUST adhere to the following pre-registered hy
    ```bash
    python statistical_analysis.py
    ```
+
+---
+
+## VI. Generator Model Policy & Reproducibility Limitations
+
+### Generator Model Policy
+- **Primary Generator**: `gemini-3.6-flash`
+- **Fallback Priority**: `["gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-flash-latest"]`
+- **Auditability**: The exact model serving each API response is recorded per-call in quarantine JSON artifacts and ledger database entries (`generator_model`).
+- **Symmetry**: Both targeted and uniform generation loops share the identical model priority list, fallback routing, client-side rate pacing (15 RPM), and temperature configuration (0.4).
+
+### Remaining Reproducibility Limitations
+1. **API Non-Determinism**: Upstream hosted LLM sampling exhibits minor non-determinism even at fixed temperature and seed parameters.
+2. **Process Resource Limits**: OS-level RLIMIT CPU/memory enforcement depends on POSIX `resource` availability and falls back gracefully under Windows environments.
+3. **Pre-Experiment Freeze**: Quality gates, ledger schema, rate controls, and test suites are frozen at revision `phase0-experiment-freeze-v3`.

@@ -94,15 +94,20 @@ python -m unittest test_phase0_pipeline.py
 - **Targeted Pipeline (`targeted_generation.py`)**: Prompts candidate problems targeted specifically at empirical execution failure clusters (`FC_01`..`FC_08`).
 - **Uniform Control Pipeline (`uniform_generation.py`)**: Identical generator model, decoupled 2-pass oracle, deduplication, ledger schema, and rate control, differing **only** by sampling uniformly across failure categories without failure targeting.
 
-## Throughput Optimization Status
+## Throughput Optimization & Quality Gates Status
 
 Both generation pipelines accept `--batch-size N`. `N` is the number of candidate generation tasks dispatched per outer loop iteration. Each candidate still uses the same decoupled two-pass LLM generation design, so a successful candidate normally requires two Gemini API requests. Generation tasks are run concurrently with `ThreadPoolExecutor`; verification, deduplication, calibration, and ledger writes are consumed afterward in deterministic seed order.
 
 The targeted subtype scheduler uses approval feedback only among subtypes with the lowest accepted count, with planned batch slots reserved before dispatch. This preserves the intended accepted subtype allocation while allowing adaptive attempt ordering within tied strata.
 
-The pre-oracle syntax stage validates and normalizes generated Python before subprocess verification. It strips markdown fences and trailing whitespace only; it does not perform semantic code repair.
+### Four Surgical Scientific Quality Gates (Phase 0)
+1. **Optimized/Reference Structural Independence Gate (`quality_gates.py`)**: Checks whether the generated optimized solution (`solve`) and brute-force reference (`solve_brute`) are suspiciously isomorphic ($S_{\text{AST}} \ge 0.85$ or identical CFG/AST). Rejects and quarantines near-isomorphic pairs before verification.
+2. **Subtype Validity Gate (`quality_gates.py`)**: Applies deterministic AST/structural evidence verification to ensure candidates genuinely instantiate declared curriculum subtypes (Types A–F). Mismatched candidates are quarantined.
+3. **Complexity-Aware Phase A Scaling (`oracle_refactor.py`)**: Derives conservative Phase A test scale bounds ($N \le 5$) for combinatorial/recursive brute-force solvers, preventing timeouts while maintaining strict differential verification.
+4. **Controlled 1-Shot Syntax Failure Regeneration (`syntax_repair.py`)**: If generated code fails Python syntax parsing, pinpoints the malformed component (`solve_opt`, `solve_brute`, or `test_gen`) and performs at most one isolated component-level regeneration attempt. Spec and other components remain unchanged.
 
 ## Documentation & Auditing
 
 - [Migration Guide](docs/MIGRATION.md)
 - [Reproducibility Protocol](docs/REPRODUCIBILITY.md)
+- [Experiment Freeze](docs/EXPERIMENT_FREEZE.md)

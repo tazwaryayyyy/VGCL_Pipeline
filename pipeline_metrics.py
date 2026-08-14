@@ -33,6 +33,13 @@ class _Counters:
     dedup_rejections: int = 0       # Structural deduplication rejections
     approved: int = 0               # Samples accepted into ledger
     api_calls: int = 0              # Total LLM API calls made
+    initial_generation_api_calls: int = 0
+    syntax_retry_api_calls: int = 0
+    syntax_retry_successes: int = 0
+    reference_independence_rejections: int = 0
+    subtype_rejections: int = 0
+    phase_a_failures: int = 0
+    phase_b_failures: int = 0
 
     # Per-subtype approved / attempted counters
     subtype_approved: Dict[str, int] = field(default_factory=dict)
@@ -99,6 +106,23 @@ class PipelineMetrics:
         with self._lock:
             self._counters.api_calls += count
 
+    def record_initial_generation_api_calls(self, count: int) -> None:
+        """Records API calls used by initial two-pass generation."""
+        with self._lock:
+            self._counters.initial_generation_api_calls += count
+            self._counters.api_calls += count
+
+    def record_syntax_retry_api_calls(self, count: int) -> None:
+        """Records API calls used by the one allowed syntax retry."""
+        with self._lock:
+            self._counters.syntax_retry_api_calls += count
+            self._counters.api_calls += count
+
+    def record_syntax_retry_success(self) -> None:
+        """Records a syntax retry that produced parseable package code."""
+        with self._lock:
+            self._counters.syntax_retry_successes += 1
+
     def record_syntax_failure(self) -> None:
         """Records one sample that failed pre-oracle syntax validation."""
         with self._lock:
@@ -124,15 +148,35 @@ class PipelineMetrics:
         with self._lock:
             self._counters.phase_a_passes += 1
 
+    def record_phase_a_failure(self) -> None:
+        """Records one Phase A oracle failure."""
+        with self._lock:
+            self._counters.phase_a_failures += 1
+
     def record_phase_b_pass(self) -> None:
         """Records one Phase B pass (i.e., fully verified)."""
         with self._lock:
             self._counters.phase_b_passes += 1
 
+    def record_phase_b_failure(self) -> None:
+        """Records one Phase B oracle failure."""
+        with self._lock:
+            self._counters.phase_b_failures += 1
+
     def record_dedup_rejection(self) -> None:
         """Records one deduplication rejection."""
         with self._lock:
             self._counters.dedup_rejections += 1
+
+    def record_reference_independence_rejection(self) -> None:
+        """Records optimized/reference structural-independence rejection."""
+        with self._lock:
+            self._counters.reference_independence_rejections += 1
+
+    def record_subtype_rejection(self) -> None:
+        """Records deterministic subtype-validation rejection."""
+        with self._lock:
+            self._counters.subtype_rejections += 1
 
     def record_approved(self, subtype: str = "", cluster: str = "") -> None:
         """Records one sample accepted into the ledger."""
@@ -223,6 +267,15 @@ class PipelineMetrics:
             "dedup_submissions": dedup_submissions,
             "dedup_rejections": c.dedup_rejections,
             "api_calls": c.api_calls,
+            "generation_attempts": c.attempts,
+            "initial_generation_api_calls": c.initial_generation_api_calls,
+            "syntax_retry_api_calls": c.syntax_retry_api_calls,
+            "total_generation_api_calls": c.api_calls,
+            "syntax_retry_successes": c.syntax_retry_successes,
+            "reference_independence_rejections": c.reference_independence_rejections,
+            "subtype_rejections": c.subtype_rejections,
+            "phase_a_failures": c.phase_a_failures,
+            "phase_b_failures": c.phase_b_failures,
             # Rates
             "approval_rate": round(approval_rate, 6),
             "syntax_pass_rate": round(syntax_pass_rate, 6),

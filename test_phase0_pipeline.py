@@ -23,8 +23,19 @@ from experiment_ledger import ExperimentLedger, LedgerEntry
 from failure_mapper import FailureCategory, FailureMapper, classify_failure
 from oracle_refactor import VerificationOracle
 from pipeline_metrics import PipelineMetrics
+from quality_gates import (
+    case_within_phase_a_policy,
+    check_reference_independence,
+    derive_phase_a_scale_policy,
+    validate_subtype,
+)
 from statistical_analysis import VGCLStatisticalAnalyzer
-from syntax_repair import SyntaxDiagnostic, check_and_repair
+from syntax_repair import (
+    SyntaxDiagnostic,
+    check_and_repair,
+    identify_malformed_component,
+    regenerate_syntax_component,
+)
 from targeted_generation import SUBTYPES, SubtypeScheduler
 from transfer_matrix import TransferMatrixCalculator
 
@@ -373,6 +384,363 @@ class TestPhase0Pipeline(unittest.TestCase):
         self.assertEqual(diag_ok["phase_b_failure"], "none")
         self.assertFalse(diag_ok["is_timeout"])
         self.assertFalse(diag_ok["is_memory"])
+
+    # ------------------------------------------------------------------
+    # Tests for the Four Surgical Scientific Corrections
+    # ------------------------------------------------------------------
+
+    def test_01_reference_independence_rejection(self):
+        """Test 1: Optimized/reference structural similarity rejection."""
+        # Both solve and solve_brute implement identical deque shift loops
+        solve_opt = (
+            "from collections import deque\n"
+            "def solve(nums, k):\n"
+            "    d = deque()\n"
+            "    for i, x in enumerate(nums):\n"
+            "        while d and d[-1] < x:\n"
+            "            d.pop()\n"
+            "        d.append(x)\n"
+            "    return list(d)\n"
+        )
+        solve_brute = (
+            "from collections import deque\n"
+            "def solve_brute(nums, k):\n"
+            "    d = deque()\n"
+            "    for i, x in enumerate(nums):\n"
+            "        while d and d[-1] < x:\n"
+            "            d.pop()\n"
+            "        d.append(x)\n"
+            "    return list(d)\n"
+        )
+        res = check_reference_independence(solve_opt, solve_brute)
+        self.assertEqual(res["status"], "REJECT")
+        self.assertGreaterEqual(res["similarity_score"], 0.85)
+        self.assertEqual(res["threshold"], 0.85)
+
+    def test_02_reference_independence_passes_structurally_distinct(self):
+        """Test 2: Legitimate structurally different optimized/reference pair passes."""
+        # solve: linear sliding window with deque
+        solve_opt = (
+            "from collections import deque\n"
+            "def solve(nums, k):\n"
+            "    q = deque()\n"
+            "    res = []\n"
+            "    for i, x in enumerate(nums):\n"
+            "        if q and q[0] <= i - k:\n"
+            "            q.popleft()\n"
+            "        while q and nums[q[-1]] <= x:\n"
+            "            q.pop()\n"
+            "        q.append(i)\n"
+            "        if i >= k - 1:\n"
+            "            res.append(nums[q[0]])\n"
+            "    return res\n"
+        )
+        # solve_brute: naive O(N*K) slice maximum
+        solve_brute = (
+            "def solve_brute(nums, k):\n"
+            "    out = []\n"
+            "    for i in range(len(nums) - k + 1):\n"
+            "        cur_max = nums[i]\n"
+            "        for j in range(i, i + k):\n"
+            "            if nums[j] > cur_max:\n"
+            "                cur_max = nums[j]\n"
+            "        out.append(cur_max)\n"
+            "    return out\n"
+        )
+        res = check_reference_independence(solve_opt, solve_brute)
+        self.assertEqual(res["status"], "PASS")
+        self.assertLess(res["similarity_score"], 0.85)
+
+    def test_03_subtype_mismatch_rejected(self):
+        """Test 3: Subtype mismatch is rejected."""
+        spec = "Find the maximum of each sliding window of size k."
+        # Declared Type A (sliding-window extrema), but solution is a simple sum
+        invalid_opt = "def solve(nums, k):\n    return sum(nums)"
+        res = validate_subtype("Type A: sliding-window extrema", spec, invalid_opt)
+        self.assertEqual(res["status"], "REJECT")
+        self.assertIn("declared subtype lacks deterministic structural evidence", res["reason"])
+
+    def test_04_validator_supported_subtypes_pass(self):
+        """Test 4: At least one valid instance of each validator-supported subtype passes."""
+        subtypes_and_code = [
+            (
+                "Type A: sliding-window extrema",
+                "Find maximum in sliding window",
+                "from collections import deque\ndef solve(nums, k):\n    q = deque()\n    for x in nums:\n        while q and q[-1] < x: q.pop()\n        q.append(x)\n    return list(q)",
+            ),
+            (
+                "Type B: bounded-transition DP",
+                "Dynamic programming transition with memoization",
+                "def solve(n, k):\n    dp = [0] * (n + 1)\n    for i in range(1, n + 1):\n        for j in range(max(0, i - k), i):\n            dp[i] = max(dp[i], dp[j] + 1)\n    return dp[n]",
+            ),
+            (
+                "Type C: prefix-sum deque optimization",
+                "Subarray prefix sum optimization",
+                "from collections import deque\ndef solve(nums, k):\n    prefix = [0]\n    for x in nums: prefix.append(prefix[-1] + x)\n    q = deque([0])\n    ans = 0\n    for i in range(1, len(prefix)):\n        while q and prefix[i] - prefix[q[0]] > k: q.popleft()\n        ans = max(ans, prefix[i] - prefix[q[0]])\n        q.append(i)\n    return ans",
+            ),
+            (
+                "Type D: convex optimization deque",
+                "Convex hull line container slope trick",
+                "from collections import deque\ndef solve(lines, x):\n    hull = deque()\n    for m, c in lines:\n        while len(hull) >= 2:\n            pass\n        hull.append((m, c))\n    return len(hull)",
+            ),
+            (
+                "Type E: shortest-path deque variants",
+                "0-1 BFS graph shortest path on grid",
+                "from collections import deque\ndef solve(graph, start):\n    q = deque([start])\n    dist = {start: 0}\n    while q:\n        u = q.popleft()\n        for v, w in graph.get(u, []):\n            if v not in dist:\n                dist[v] = dist[u] + w\n                q.append(v)\n    return dist",
+            ),
+            (
+                "Type F: hybrid stack/deque structures",
+                "Hybrid monotonic stack and deque parser",
+                "from collections import deque\ndef solve(tokens):\n    stack = []\n    q = deque()\n    for t in tokens:\n        stack.append(t)\n        q.append(t)\n    return len(stack) + len(q)",
+            ),
+        ]
+        for st, spec, code in subtypes_and_code:
+            res = validate_subtype(st, spec, code)
+            self.assertEqual(res["status"], "PASS", f"Subtype '{st}' failed validation: {res}")
+
+    def test_05_phase_a_complexity_policy_lowers_scale_for_pathological_brute(self):
+        """Test 5: Phase A complexity policy lowers test scale for a pathological brute solver."""
+        pathological_brute = (
+            "def solve_brute(arr):\n"
+            "    if not arr:\n"
+            "        return 0\n"
+            "    # Recursive combinatorial tree exploration\n"
+            "    return solve_brute(arr[1:]) + solve_brute(arr[1:])\n"
+        )
+        policy = derive_phase_a_scale_policy(pathological_brute)
+        self.assertEqual(policy["maximum_dimension"], 5)
+        self.assertEqual(policy["policy"], "pathological_bruteforce_cap")
+
+    def test_06_phase_a_complexity_policy_normal_brute_unchanged(self):
+        """Test 6: Phase A remains unchanged for a normal brute solver."""
+        normal_brute = (
+            "def solve_brute(arr):\n"
+            "    total = 0\n"
+            "    for x in arr:\n"
+            "        total += x\n"
+            "    return total\n"
+        )
+        policy = derive_phase_a_scale_policy(normal_brute)
+        self.assertEqual(policy["maximum_dimension"], 8)
+        self.assertEqual(policy["policy"], "default_small_scale")
+
+    def test_07_exactly_one_syntax_retry_occurs(self):
+        """Test 7: Exactly one syntax retry occurs."""
+        blocks = {
+            "spec": "Calculate sum of numbers.",
+            "solve_opt": "def solve(nums):\n    return sum(nums)",
+            "solve_brute": "def solve_brute(nums)\n    return sum(nums)",  # Missing colon SyntaxError
+            "test_gen": "def generate_test_cases(seed, scale):\n    return [([1, 2],)]",
+        }
+        malformed, diag = identify_malformed_component(blocks)
+        self.assertEqual(malformed, "solve_brute")
+
+        call_count = 0
+        def mock_llm(sys_prompt, user_prompt):
+            nonlocal call_count
+            call_count += 1
+            return "### SOLVE_BRUTE\ndef solve_brute(nums):\n    return sum(nums)", "mock-model", 0.1, 1
+
+        retry_ok, new_blocks, prov, calls = regenerate_syntax_component(
+            component_name=malformed,
+            blocks=blocks,
+            cluster_id="FC_01_MICRO_CORRECTNESS",
+            subtype="Type A: sliding-window extrema",
+            seed=42,
+            llm_caller=mock_llm,
+            original_error=diag.error_msg,
+        )
+        self.assertEqual(call_count, 1)
+        self.assertTrue(retry_ok)
+        self.assertTrue(prov["retry_succeeded"])
+        self.assertEqual(calls, 1)
+
+    def test_08_syntax_failure_after_retry_quarantined(self):
+        """Test 8: Syntax failure after the retry enters quarantine."""
+        oracle = VerificationOracle(quarantine_dir=self.quarantine_dir)
+        blocks = {
+            "spec": "Calculate sum of numbers.",
+            "solve_opt": "def solve(nums):\n    return sum(nums)",
+            "solve_brute": "def solve_brute(nums)\n    invalid python code ::::",
+            "test_gen": "def generate_test_cases(seed, scale):\n    return [([1, 2],)]",
+        }
+        malformed, diag = identify_malformed_component(blocks)
+
+        def mock_failing_llm(sys_prompt, user_prompt):
+            # Model returns another syntax error
+            return "### SOLVE_BRUTE\ndef solve_brute(nums)\n    still bad syntax", "mock-model", 0.1, 1
+
+        retry_ok, _, prov, _ = regenerate_syntax_component(
+            component_name=malformed,
+            blocks=blocks,
+            cluster_id="FC_01_MICRO_CORRECTNESS",
+            subtype="Type A: sliding-window extrema",
+            seed=42,
+            llm_caller=mock_failing_llm,
+            original_error=diag.error_msg,
+        )
+        self.assertFalse(retry_ok)
+        self.assertFalse(prov["retry_succeeded"])
+
+        # Quarantine candidate
+        art_id = oracle.quarantine(
+            seed=42,
+            prompt_hash="hash_test",
+            generator_model="mock-model",
+            generator_version="v1.0",
+            optimized_code=blocks["solve_opt"],
+            reference_code=blocks["solve_brute"],
+            test_generator_code=blocks["test_gen"],
+            quarantine_reason=f"Syntax Failure: {diag.error_category}",
+        )
+        self.assertTrue(os.path.exists(os.path.join(self.quarantine_dir, f"{art_id}.json")))
+
+    def test_09_successful_syntax_retry_reaches_oracle(self):
+        """Test 9: Successful syntax retry reaches the oracle."""
+        oracle = VerificationOracle(quarantine_dir=self.quarantine_dir)
+        blocks = {
+            "spec": "Calculate sum of numbers.",
+            "solve_opt": "def solve(nums):\n    return sum(nums)",
+            "solve_brute": "def solve_brute(nums)\n    broken",
+            "test_gen": (
+                "import random\n"
+                "def generate_test_cases(seed, scale):\n"
+                "    random.seed(seed)\n"
+                "    return [([1, 2, 3],)]\n"
+            ),
+        }
+        malformed, diag = identify_malformed_component(blocks)
+
+        def mock_fixing_llm(sys_prompt, user_prompt):
+            return "### SOLVE_BRUTE\ndef solve_brute(nums):\n    return sum(nums)", "mock-model", 0.1, 1
+
+        retry_ok, fixed_blocks, prov, _ = regenerate_syntax_component(
+            component_name=malformed,
+            blocks=blocks,
+            cluster_id="FC_01_MICRO_CORRECTNESS",
+            subtype="Type A: sliding-window extrema",
+            seed=42,
+            llm_caller=mock_fixing_llm,
+            original_error=diag.error_msg,
+        )
+        self.assertTrue(retry_ok)
+        full_code = f"{fixed_blocks['solve_opt']}\n\n{fixed_blocks['solve_brute']}\n\n{fixed_blocks['test_gen']}"
+        res = oracle.verify(full_code, seed=42)
+        self.assertTrue(res["verified"])
+
+    def test_10_only_malformed_component_regenerated(self):
+        """Test 10: Only the malformed component is regenerated."""
+        original_spec = "Original immutable spec."
+        original_solve_opt = "def solve(arr):\n    return sorted(arr)"
+        original_test_gen = "def generate_test_cases(seed, scale):\n    return [([1, 2],)]"
+        blocks = {
+            "spec": original_spec,
+            "solve_opt": original_solve_opt,
+            "solve_brute": "def solve_brute(arr)\n    broken",
+            "test_gen": original_test_gen,
+        }
+
+        def mock_llm(sys_prompt, user_prompt):
+            return "### SOLVE_BRUTE\ndef solve_brute(arr):\n    return sorted(arr)", "mock-model", 0.1, 1
+
+        retry_ok, new_blocks, prov, _ = regenerate_syntax_component(
+            component_name="solve_brute",
+            blocks=blocks,
+            cluster_id="FC_01_MICRO_CORRECTNESS",
+            subtype="Type A: sliding-window extrema",
+            seed=42,
+            llm_caller=mock_llm,
+            original_error="invalid syntax",
+        )
+        self.assertTrue(retry_ok)
+        self.assertEqual(new_blocks["spec"], original_spec)
+        self.assertEqual(new_blocks["solve_opt"], original_solve_opt)
+        self.assertEqual(new_blocks["test_gen"], original_test_gen)
+        self.assertEqual(new_blocks["solve_brute"], "def solve_brute(arr):\n    return sorted(arr)")
+
+    def test_11_api_call_metrics_count_retries(self):
+        """Test 11: API-call metrics count retry calls correctly."""
+        m = PipelineMetrics()
+        m.record_attempt(subtype="Type A", cluster="FC_01")
+        m.record_initial_generation_api_calls(2)
+        m.record_syntax_retry_api_calls(1)
+        m.record_syntax_retry_success()
+        m.record_approved(subtype="Type A", cluster="FC_01")
+
+        snap = m.snapshot()
+        self.assertEqual(snap["initial_generation_api_calls"], 2)
+        self.assertEqual(snap["syntax_retry_api_calls"], 1)
+        self.assertEqual(snap["total_generation_api_calls"], 3)
+        self.assertEqual(snap["api_calls"], 3)
+        self.assertEqual(snap["syntax_retry_successes"], 1)
+
+    def test_12_targeted_and_uniform_symmetry(self):
+        """Test 12: Targeted and uniform use the same new verification gates."""
+        import targeted_generation
+        import uniform_generation
+
+        # Both modules must import and use the exact same gate functions
+        self.assertIs(targeted_generation.check_reference_independence, check_reference_independence)
+        self.assertIs(uniform_generation.check_reference_independence, check_reference_independence)
+        self.assertIs(targeted_generation.validate_subtype, validate_subtype)
+        self.assertIs(uniform_generation.validate_subtype, validate_subtype)
+        self.assertIs(targeted_generation.regenerate_syntax_component, regenerate_syntax_component)
+        self.assertIs(uniform_generation.regenerate_syntax_component, regenerate_syntax_component)
+
+    def test_13_cross_gate_compound_flow(self):
+        """Test 13: Compound flow with syntax retry, reference independence, and subtype gates."""
+        # 1. Syntax retry succeeds but reference similarity rejects near-isomorphic code
+        blocks = {
+            "spec": "Find maximum element.",
+            "solve_opt": "def solve(arr):\n    return max(arr)",
+            "solve_brute": "def solve_brute(arr)\n    broken",
+            "test_gen": "def generate_test_cases(seed, scale):\n    return [([1, 2],)]",
+        }
+        def mock_llm(sys_p, user_p):
+            return "### SOLVE_BRUTE\ndef solve_brute(arr):\n    return max(arr)", "mock-model", 0.1, 1
+
+        retry_ok, new_blocks, _, _ = regenerate_syntax_component(
+            component_name="solve_brute",
+            blocks=blocks,
+            cluster_id="FC_01_MICRO_CORRECTNESS",
+            subtype="Type A: sliding-window extrema",
+            seed=100,
+            llm_caller=mock_llm,
+        )
+        self.assertTrue(retry_ok)
+        ref_ind = check_reference_independence(new_blocks["solve_opt"], new_blocks["solve_brute"])
+        self.assertEqual(ref_ind["status"], "REJECT")
+
+        # 2. Reference independent but subtype invalid
+        solve_opt = "def solve(arr):\n    return [x for x in arr if x > 0]"
+        solve_brute = "def solve_brute(arr):\n    out = []\n    for x in arr:\n        if x > 0: out.append(x)\n    return out"
+        st_val = validate_subtype("Type A: sliding-window extrema", "Filter positive numbers", solve_opt)
+        self.assertEqual(st_val["status"], "REJECT")
+
+    def test_14_reference_independence_missing_function_rejected(self):
+        """Test 14: Missing required solution function is rejected with diagnostic."""
+        solve_opt = "def wrong_name(nums):\n    return sum(nums)\n"
+        solve_brute = "def solve_brute(nums):\n    return sum(nums)\n"
+        res = check_reference_independence(solve_opt, solve_brute)
+        self.assertEqual(res["status"], "REJECT")
+        self.assertEqual(res["reason"], "required solution function missing")
+        self.assertEqual(res["similarity_score"], 1.0)
+
+    def test_15_phase_a_scale_policy_boundaries_and_combinatorial(self):
+        """Test 15: Phase A scale policy bounds and combinatorial detection."""
+        # Combinatorial itertools detection
+        code_itertools = "import itertools\ndef solve_brute(arr):\n    return list(itertools.permutations(arr))"
+        pol = derive_phase_a_scale_policy(code_itertools)
+        self.assertEqual(pol["policy"], "pathological_bruteforce_cap")
+        self.assertEqual(pol["maximum_dimension"], 5)
+
+        # Boundary checks
+        pol5 = {"maximum_dimension": 5}
+        pol8 = {"maximum_dimension": 8}
+        self.assertTrue(case_within_phase_a_policy(([1, 2, 3, 4, 5],), pol5))
+        self.assertFalse(case_within_phase_a_policy(([1, 2, 3, 4, 5, 6],), pol5))
+        self.assertTrue(case_within_phase_a_policy(([1, 2, 3, 4, 5, 6, 7, 8],), pol8))
+        self.assertFalse(case_within_phase_a_policy(([1, 2, 3, 4, 5, 6, 7, 8, 9],), pol8))
 
 
 if __name__ == "__main__":
