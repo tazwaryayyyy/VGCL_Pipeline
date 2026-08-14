@@ -19,7 +19,34 @@ Central Hypothesis:
 
 ---
 
-## II. Module Reference & Reproducibility Pipeline
+## II. Throughput Optimization Semantics
+
+The throughput optimization is engineering-only and does not change oracle thresholds, failure taxonomy, AST/CFG deduplication, ledger schema, calibration data, evaluation data, or the two-pass oracle independence design.
+
+`--batch-size N` means that up to `N` independent candidate generation tasks are submitted in one outer loop iteration. A successful candidate still performs the same two isolated LLM passes: Pass 1 generates `PROBLEM_SPEC`, `SOLVE_OPTIMIZED`, and `TEST_GENERATOR`; Pass 2 receives only `PROBLEM_SPEC` and generates `SOLVE_BRUTE`. Therefore `batch_size=3` does not mean one Gemini request returning three candidates. It means up to three concurrent candidate workers, normally requiring up to six successful Gemini requests in total.
+
+Concurrency is limited to candidate generation. Verification oracle execution, syntax validation, structural deduplication, calibration, and ledger writes are processed after generation results are collected. Results are consumed in sorted seed order, so completion order cannot change acceptance order, deduplication order, or scheduler feedback order.
+
+Seeds are assigned before generation workers are submitted. This provides seed determinism and deterministic result ordering. It does not imply that adaptive-policy trajectories are identical for every `batch_size`: when `batch_size > 1`, subtype choices for the batch are made before observing within-batch outcomes. The targeted scheduler therefore reserves planned accepted-count slots before dispatch and restricts approval-weighted sampling to subtypes tied for the lowest accepted count. Approval feedback can change attempt ordering within tied strata, but it must not let easy-to-generate subtypes overtake the accepted curriculum allocation.
+
+The pre-oracle syntax stage is a normalization gate, not a semantic repair system. It validates `ast.parse()` in process, strips leading/trailing markdown code fences and trailing whitespace when needed, and revalidates. It does not change algorithmic logic, identifiers, control flow, or oracle criteria. If normalization fails, the candidate is rejected before oracle submission.
+
+Metrics are defined as follows:
+
+- `approval_rate = approved / generation_attempts`
+- `syntax_pass_rate = syntax_passes / syntax_attempts`, where `syntax_attempts = generation_attempts - generation_block_parse_errors`
+- `phase_a_pass_rate = phase_a_passes / oracle_submissions`
+- `phase_b_pass_rate = phase_b_passes / phase_b_submissions`, where `phase_b_submissions = phase_a_passes`
+- `dedup_rejection_rate = dedup_rejections / dedup_submissions`, where `dedup_submissions = phase_b_passes`
+- `api_calls_per_approved = api_calls / approved`
+- `approval_rate_by_subtype = approved_subtype / attempted_subtype`
+- `approval_rate_by_cluster = approved_cluster / attempted_cluster`
+
+Throughput benchmarks must use disposable outputs and report actual measured wall-clock time, API calls, attempts, pass rates, deduplication rejections, accepted candidates, approved candidates per minute, approved candidates per API call, and mean generation/verification latencies. Mock benchmarks may validate local batching mechanics, but they are not evidence of real Gemini API throughput.
+
+---
+
+## III. Module Reference & Reproducibility Pipeline
 
 ```
 ┌─────────────────────────┐
@@ -61,7 +88,7 @@ Central Hypothesis:
 
 ---
 
-## III. Pre-Registered Training Protocol (LoRA Fine-Tuning)
+## IV. Pre-Registered Training Protocol (LoRA Fine-Tuning)
 
 All model fine-tuning experiments MUST adhere to the following pre-registered hyperparameter configuration:
 
@@ -79,7 +106,7 @@ All model fine-tuning experiments MUST adhere to the following pre-registered hy
 
 ---
 
-## IV. Audit Commands for External Researchers
+## V. Audit Commands for External Researchers
 
 1. **Verify Failure Attribution & Clustering**:
    ```bash

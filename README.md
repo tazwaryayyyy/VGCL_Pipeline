@@ -33,7 +33,7 @@ Deterministic Failure Attribution (FC_01...FC_08)
   ┌─────────┴─────────┐
   ▼                   ▼
 Targeted Generation   Uniform Control Generation
-(targeted_gen.py)     (uniform_gen.py)
+(targeted_generation.py) (uniform_generation.py)
   │                   │
   └─────────┬─────────┘
             ▼
@@ -93,6 +93,14 @@ python -m unittest test_phase0_pipeline.py
 
 - **Targeted Pipeline (`targeted_generation.py`)**: Prompts candidate problems targeted specifically at empirical execution failure clusters (`FC_01`..`FC_08`).
 - **Uniform Control Pipeline (`uniform_generation.py`)**: Identical generator model, decoupled 2-pass oracle, deduplication, ledger schema, and rate control, differing **only** by sampling uniformly across failure categories without failure targeting.
+
+## Throughput Optimization Status
+
+Both generation pipelines accept `--batch-size N`. `N` is the number of candidate generation tasks dispatched per outer loop iteration. Each candidate still uses the same decoupled two-pass LLM generation design, so a successful candidate normally requires two Gemini API requests. Generation tasks are run concurrently with `ThreadPoolExecutor`; verification, deduplication, calibration, and ledger writes are consumed afterward in deterministic seed order.
+
+The targeted subtype scheduler uses approval feedback only among subtypes with the lowest accepted count, with planned batch slots reserved before dispatch. This preserves the intended accepted subtype allocation while allowing adaptive attempt ordering within tied strata.
+
+The pre-oracle syntax stage validates and normalizes generated Python before subprocess verification. It strips markdown fences and trailing whitespace only; it does not perform semantic code repair.
 
 ## Documentation & Auditing
 

@@ -17,12 +17,15 @@ import os
 import random
 import sys
 import time
-from typing import Any, Dict, List, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 
 from cfg_dedup import StructuralDeduplicationEngine
 from experiment_ledger import ExperimentLedger, LedgerEntry
 from oracle_refactor import VerificationOracle
+from pipeline_metrics import PipelineMetrics
+from syntax_repair import check_and_repair
 from targeted_generation import _call_llm_paced, calibrate_empirical_difficulty, client_side_pace, parse_block_content
 
 load_dotenv()
@@ -111,90 +114,208 @@ def run_uniform_generation_pipeline(
     num_samples: int = 5,
     db_path: str = "data/uniform_experiment_ledger.db",
     jsonl_path: str = "data/uniform_approved_curriculum.jsonl",
+    batch_size: int = 1,
+    metrics: Optional[PipelineMetrics] = None,
 ) -> None:
+    """
+    Uniform sampling control generation loop.
+
+    Args:
+        num_samples: Number of verified, deduplicated samples to accept.
+        db_path:     SQLite ledger path for the uniform condition.
+        jsonl_path:  JSONL output path for the uniform condition.
+        batch_size:  Number of parallel generation calls per outer iteration.
+                     Default ``1`` preserves the original serial behaviour.
+        metrics:     Optional ``PipelineMetrics`` instance.  When ``None``,
+                     a private instance is created and flushed on completion.
+    """
     print("=== STARTING UNIFORM SAMPLING CONTROL GENERATION PIPELINE ===")
 
     oracle = VerificationOracle(quarantine_dir="data/quarantine_uniform")
     dedup = StructuralDeduplicationEngine(similarity_threshold=0.70)
     ledger = ExperimentLedger(db_path=db_path, jsonl_path=jsonl_path)
 
+    if metrics is None:
+        metrics = PipelineMetrics()
+
     seed = 5000
     accepted = 0
 
     while accepted < num_samples:
-        cluster_id = UNIFORM_CLUSTERS[accepted % len(UNIFORM_CLUSTERS)]
-        seed += 1
+        # Pre-compute seeds for all items in this batch before dispatch
+        batch_seeds = [seed + i + 1 for i in range(batch_size)]
+        seed += batch_size
 
-        print(f"\n[+] Generating Uniform Sample [{accepted + 1}/{num_samples}] | Category: '{cluster_id}' | Seed: {seed}")
+        # Cluster IDs for this batch (round-robin, unchanged from original)
+        batch_clusters = [
+            UNIFORM_CLUSTERS[(accepted + i) % len(UNIFORM_CLUSTERS)]
+            for i in range(batch_size)
+        ]
 
-        ok, blocks, model_name, latency, retries = generate_uniform_candidate(
-            cluster_id=cluster_id,
-            seed=seed,
-        )
+        def _generate_one_uniform(
+            cluster_id: str,
+            b_seed: int,
+        ) -> Tuple[int, str, bool, Dict[str, str], str, float, int]:
+            """Worker thunk executed in the thread pool."""
+            ok, blocks, model_name, latency, retries = generate_uniform_candidate(
+                cluster_id=cluster_id,
+                seed=b_seed,
+            )
+            return b_seed, cluster_id, ok, blocks, model_name, latency, retries
 
-        if not ok:
-            print("  [X] Decoupled Generation Error: Block parsing failed.")
-            continue
+        effective_batch = min(batch_size, num_samples - accepted)
+        futures_map = {}
+        with ThreadPoolExecutor(max_workers=effective_batch) as executor:
+            for i in range(effective_batch):
+                fut = executor.submit(
+                    _generate_one_uniform,
+                    batch_clusters[i],
+                    batch_seeds[i],
+                )
+                futures_map[fut] = (batch_seeds[i], batch_clusters[i])
 
-        full_code = f"{blocks['solve_opt']}\n\n{blocks['solve_brute']}\n\n{blocks['test_gen']}"
-        prompt_hash = hashlib.sha256(blocks['spec'].encode("utf-8")).hexdigest()[:16]
+            results_by_seed: Dict[int, Any] = {}
+            for fut in as_completed(futures_map):
+                b_seed, cluster_id = futures_map[fut]
+                try:
+                    result = fut.result()
+                except Exception as exc:
+                    result = (b_seed, cluster_id, False, {}, "failed", 0.0, 0)
+                    print(f"  [X] Batch worker exception (seed {b_seed}): {exc}")
+                results_by_seed[b_seed] = result
 
-        # 1. Verification Oracle
-        ver_res = oracle.verify(
-            full_code=full_code,
-            seed=seed,
-            prompt_hash=prompt_hash,
-            generator_model=model_name,
-            solve_opt=blocks["solve_opt"],
-            solve_brute=blocks["solve_brute"],
-            test_gen=blocks["test_gen"],
-        )
+        # Process batch results in deterministic seed order
+        for b_seed in sorted(results_by_seed.keys()):
+            if accepted >= num_samples:
+                break
 
-        if not ver_res["verified"]:
-            print(f"  [X] Verification Failed: {ver_res['reason']} (Quarantine ID: {ver_res['quarantine_id']})")
-            continue
+            b_seed_val, cluster_id, ok, blocks, model_name, latency, api_calls = results_by_seed[b_seed]
 
-        # 2. Structural Deduplication
-        problem_id = f"PROB_UNI_{seed}"
-        dedup_res = dedup.register_candidate(problem_id, full_code)
-        if dedup_res.is_duplicate:
-            print(f"  [X] Deduplication Dropped: Similarity {dedup_res.similarity_score:.3f} >= 0.70 to {dedup_res.nearest_neighbor_problem}")
-            continue
+            metrics.record_attempt(cluster=cluster_id)
+            metrics.record_gen_latency(latency)
+            metrics.record_api_calls(api_calls)
 
-        # 3. Empirical Difficulty Calibration
-        pass1, pass10, diff = calibrate_empirical_difficulty(full_code, seed)
+            print(
+                f"\n[+] Generating Uniform Sample [{accepted + 1}/{num_samples}] "
+                f"| Category: '{cluster_id}' | Seed: {b_seed_val}"
+            )
 
-        # 4. Record in Ledger
-        entry = LedgerEntry(
-            problem_id=problem_id,
-            seed=seed,
-            generator_model=model_name,
-            generator_version="v1.0",
-            prompt_hash=prompt_hash,
-            target_failure_cluster="UNIFORM_CONTROL",
-            monotonic_queue_subtype=cluster_id,
-            base_pass1=pass1,
-            base_pass10=pass10,
-            empirical_difficulty=diff,
-            oracle_confidence=ver_res["confidence"],
-            phase_a_pass_count=ver_res["phase_a_pass_count"],
-            phase_b_pass=ver_res["phase_b_pass"],
-            verification_status="APPROVED",
-            ast_hash=dedup_res.ast_hash,
-            cfg_hash=dedup_res.cfg_hash,
-            similarity_score=dedup_res.similarity_score,
-            acceptance_reason="Approved uniform control candidate",
-            code_content=full_code,
-            spec=blocks["spec"],
-        )
-        ledger.record_entry(entry)
-        accepted += 1
-        print(f"  [✓] ACCEPTED & RECORDED (CONTROL): {problem_id} (Diff: {diff:.2f}, AST: {dedup_res.ast_hash})")
+            if not ok:
+                print("  [X] Decoupled Generation Error: Block parsing failed.")
+                metrics.record_gen_error()
+                continue
+
+            full_code = (
+                f"{blocks['solve_opt']}\n\n{blocks['solve_brute']}\n\n{blocks['test_gen']}"
+            )
+            prompt_hash = hashlib.sha256(blocks["spec"].encode("utf-8")).hexdigest()[:16]
+
+            # 0. Pre-oracle syntax validation (avoids expensive subprocess on parse failures)
+            syn_diag, full_code = check_and_repair(full_code)
+            if not syn_diag.passed:
+                print(
+                    f"  [X] Syntax Validation Failed [{syn_diag.error_category}] "
+                    f"(line {syn_diag.error_line}): {syn_diag.error_msg[:120]}"
+                )
+                metrics.record_syntax_failure()
+                continue
+
+            if syn_diag.repaired:
+                print(f"  [~] Syntax Repair Applied: {syn_diag.repair_applied}")
+                metrics.record_syntax_repair()
+
+            # 1. Verification Oracle
+            metrics.record_oracle_attempt()
+            ver_t0 = time.perf_counter()
+            ver_res = oracle.verify(
+                full_code=full_code,
+                seed=b_seed_val,
+                prompt_hash=prompt_hash,
+                generator_model=model_name,
+                solve_opt=blocks["solve_opt"],
+                solve_brute=blocks["solve_brute"],
+                test_gen=blocks["test_gen"],
+            )
+            metrics.record_verification_latency(time.perf_counter() - ver_t0)
+
+            if ver_res["phase_a_pass"]:
+                metrics.record_phase_a_pass()
+            if ver_res["phase_b_pass"]:
+                metrics.record_phase_b_pass()
+
+            if not ver_res["verified"]:
+                print(
+                    f"  [X] Verification Failed: {ver_res['reason']} "
+                    f"(Quarantine ID: {ver_res['quarantine_id']})"
+                )
+                continue
+
+            # 2. Structural Deduplication
+            problem_id = f"PROB_UNI_{b_seed_val}"
+            dedup_res = dedup.register_candidate(problem_id, full_code)
+            if dedup_res.is_duplicate:
+                print(
+                    f"  [X] Deduplication Dropped: Similarity "
+                    f"{dedup_res.similarity_score:.3f} >= 0.70 to "
+                    f"{dedup_res.nearest_neighbor_problem}"
+                )
+                metrics.record_dedup_rejection()
+                continue
+
+            # 3. Empirical Difficulty Calibration
+            pass1, pass10, diff = calibrate_empirical_difficulty(full_code, b_seed_val)
+
+            # 4. Record in Ledger
+            entry = LedgerEntry(
+                problem_id=problem_id,
+                seed=b_seed_val,
+                generator_model=model_name,
+                generator_version="v1.0",
+                prompt_hash=prompt_hash,
+                target_failure_cluster="UNIFORM_CONTROL",
+                monotonic_queue_subtype=cluster_id,
+                base_pass1=pass1,
+                base_pass10=pass10,
+                empirical_difficulty=diff,
+                oracle_confidence=ver_res["confidence"],
+                phase_a_pass_count=ver_res["phase_a_pass_count"],
+                phase_b_pass=ver_res["phase_b_pass"],
+                verification_status="APPROVED",
+                ast_hash=dedup_res.ast_hash,
+                cfg_hash=dedup_res.cfg_hash,
+                similarity_score=dedup_res.similarity_score,
+                acceptance_reason="Approved uniform control candidate",
+                code_content=full_code,
+                spec=blocks["spec"],
+            )
+            ledger.record_entry(entry)
+            accepted += 1
+            metrics.record_approved(cluster=cluster_id)
+            print(
+                f"  [✓] ACCEPTED & RECORDED (CONTROL): {problem_id} "
+                f"(Diff: {diff:.2f}, AST: {dedup_res.ast_hash})"
+            )
+
+    # Flush metrics on completion
+    metrics.flush(
+        json_path="data/metrics_uniform.json",
+        csv_path="data/metrics_uniform.csv",
+    )
+    print("\n[METRICS] Flushed to data/metrics_uniform.json")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Uniform Control Curriculum Generation")
     parser.add_argument("--num-samples", type=int, default=2)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Number of parallel generation calls per outer iteration (default: 1 = serial).",
+    )
     args = parser.parse_args()
 
-    run_uniform_generation_pipeline(num_samples=args.num_samples)
+    run_uniform_generation_pipeline(
+        num_samples=args.num_samples,
+        batch_size=args.batch_size,
+    )

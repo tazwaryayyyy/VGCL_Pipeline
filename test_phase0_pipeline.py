@@ -22,7 +22,10 @@ from cfg_dedup import StructuralDeduplicationEngine, compute_ast_hashes
 from experiment_ledger import ExperimentLedger, LedgerEntry
 from failure_mapper import FailureCategory, FailureMapper, classify_failure
 from oracle_refactor import VerificationOracle
+from pipeline_metrics import PipelineMetrics
 from statistical_analysis import VGCLStatisticalAnalyzer
+from syntax_repair import SyntaxDiagnostic, check_and_repair
+from targeted_generation import SUBTYPES, SubtypeScheduler
 from transfer_matrix import TransferMatrixCalculator
 
 
@@ -166,6 +169,210 @@ class TestPhase0Pipeline(unittest.TestCase):
         res = analyzer.evaluate_endpoint("Test Endpoint", tgt_runs, uni_runs)
         self.assertTrue(res.statistically_significant)
         self.assertGreater(res.effect_size_cohens_d, 2.0)
+
+    # ------------------------------------------------------------------
+    # New tests for throughput optimization modules
+    # ------------------------------------------------------------------
+
+    def test_syntax_repair_strips_fences(self):
+        """Verifies that markdown fence stripping produces valid-parseable code."""
+        fenced = (
+            "```python\n"
+            "def solve(arr):\n"
+            "    return sorted(arr)\n"
+            "\n"
+            "def solve_brute(arr):\n"
+            "    res = list(arr)\n"
+            "    for i in range(len(res)):\n"
+            "        for j in range(i+1, len(res)):\n"
+            "            if res[i] > res[j]:\n"
+            "                res[i], res[j] = res[j], res[i]\n"
+            "    return res\n"
+            "\n"
+            "import random\n"
+            "def generate_test_cases(seed, scale):\n"
+            "    random.seed(seed)\n"
+            "    if scale == 'small':\n"
+            "        return [([1, 2, 3],)]\n"
+            "    else:\n"
+            "        return [([1] * 100,)]\n"
+            "```"
+        )
+        diag, repaired_code = check_and_repair(fenced)
+        self.assertTrue(diag.passed, f"Expected parsed OK after fence strip, got: {diag.error_msg}")
+        self.assertTrue(diag.repaired, "Expected repaired=True when fences were stripped")
+        self.assertIn("stripped_markdown_fences", diag.repair_applied)
+        self.assertEqual(diag.error_category, "none")
+
+    def test_syntax_repair_no_op_on_clean_code(self):
+        """Verifies that already-valid code returns repaired=False and passes immediately."""
+        clean = (
+            "def solve(x):\n"
+            "    return x * 2\n"
+            "\n"
+            "def solve_brute(x):\n"
+            "    result = 0\n"
+            "    for _ in range(x):\n"
+            "        result += 2\n"
+            "    return result\n"
+            "\n"
+            "import random\n"
+            "def generate_test_cases(seed, scale):\n"
+            "    random.seed(seed)\n"
+            "    if scale == 'small':\n"
+            "        return [(random.randint(1, 5),) for _ in range(3)]\n"
+            "    else:\n"
+            "        return [(random.randint(100, 500),) for _ in range(2)]\n"
+        )
+        diag, returned_code = check_and_repair(clean)
+        self.assertTrue(diag.passed)
+        self.assertFalse(diag.repaired)
+        self.assertEqual(diag.repair_applied, "none")
+        self.assertEqual(diag.error_category, "none")
+        self.assertEqual(returned_code, clean)
+
+    def test_pipeline_metrics_records_approval(self):
+        """Unit test: PipelineMetrics counters are mutated correctly across attempt/approval."""
+        m = PipelineMetrics()
+        m.record_attempt(subtype="Type A: sliding-window extrema", cluster="FC_01_MICRO_CORRECTNESS")
+        m.record_gen_latency(3.5)
+        m.record_api_calls(2)
+        m.record_syntax_repair()
+        m.record_oracle_attempt()
+        m.record_phase_a_pass()
+        m.record_phase_b_pass()
+        m.record_approved(subtype="Type A: sliding-window extrema", cluster="FC_01_MICRO_CORRECTNESS")
+
+        snap = m.snapshot()
+        self.assertEqual(snap["attempts"], 1)
+        self.assertEqual(snap["approved"], 1)
+        self.assertEqual(snap["syntax_repairs"], 1)
+        self.assertEqual(snap["oracle_attempts"], 1)
+        self.assertEqual(snap["phase_a_passes"], 1)
+        self.assertEqual(snap["phase_b_passes"], 1)
+        self.assertEqual(snap["approval_rate"], 1.0)
+        self.assertEqual(snap["api_calls"], 2)
+        self.assertIn("Type A: sliding-window extrema", snap["approval_rate_by_subtype"])
+        self.assertEqual(snap["approval_rate_by_subtype"]["Type A: sliding-window extrema"], 1.0)
+        self.assertIn("FC_01_MICRO_CORRECTNESS", snap["approval_rate_by_cluster"])
+
+    def test_pipeline_metrics_denominators(self):
+        """Known event sequence yields exact rate denominators."""
+        m = PipelineMetrics()
+
+        # Attempt 1: generation/block parsing failure, so syntax was never attempted.
+        m.record_attempt(subtype="A", cluster="FC")
+        m.record_api_calls(1)
+        m.record_gen_error()
+
+        # Attempt 2: generation succeeded, syntax failed before oracle.
+        m.record_attempt(subtype="A", cluster="FC")
+        m.record_api_calls(2)
+        m.record_syntax_failure()
+
+        # Attempt 3: verified by oracle, then rejected by deduplication.
+        m.record_attempt(subtype="B", cluster="FC")
+        m.record_api_calls(2)
+        m.record_oracle_attempt()
+        m.record_phase_a_pass()
+        m.record_phase_b_pass()
+        m.record_dedup_rejection()
+
+        # Attempt 4: accepted into the ledger.
+        m.record_attempt(subtype="B", cluster="FC")
+        m.record_api_calls(2)
+        m.record_oracle_attempt()
+        m.record_phase_a_pass()
+        m.record_phase_b_pass()
+        m.record_approved(subtype="B", cluster="FC")
+
+        snap = m.snapshot()
+        self.assertEqual(snap["attempts"], 4)
+        self.assertEqual(snap["syntax_attempts"], 3)
+        self.assertEqual(snap["syntax_passes"], 2)
+        self.assertEqual(snap["dedup_submissions"], 2)
+        self.assertEqual(snap["approval_rate"], 0.25)
+        self.assertAlmostEqual(snap["syntax_pass_rate"], 2 / 3, places=6)
+        self.assertEqual(snap["phase_a_pass_rate"], 1.0)
+        self.assertEqual(snap["phase_b_pass_rate"], 1.0)
+        self.assertEqual(snap["dedup_rejection_rate"], 0.5)
+        self.assertEqual(snap["api_calls_per_approved"], 7.0)
+
+    def test_subtype_scheduler_seed_determinism_and_batch_coverage(self):
+        """Same seed path is deterministic and planned batch slots cover subtypes."""
+        scheduler_a = SubtypeScheduler(subtypes=SUBTYPES)
+        scheduler_b = SubtypeScheduler(subtypes=SUBTYPES)
+
+        planned_a = {}
+        planned_b = {}
+        seq_a = []
+        seq_b = []
+        for seed in range(1001, 1001 + len(SUBTYPES)):
+            st_a = scheduler_a.select(planned_a, seed)
+            st_b = scheduler_b.select(planned_b, seed)
+            seq_a.append(st_a)
+            seq_b.append(st_b)
+            planned_a[st_a] = planned_a.get(st_a, 0) + 1
+            planned_b[st_b] = planned_b.get(st_b, 0) + 1
+
+        self.assertEqual(seq_a, seq_b)
+        self.assertEqual(seq_a, SUBTYPES)
+        self.assertEqual(set(seq_a), set(SUBTYPES))
+
+    def test_oracle_returns_rejection_diagnostics(self):
+        """Verifies that the new rejection_diagnostics key is present on both failed and
+        successful oracle results, and that its structure is stable and machine-readable."""
+        oracle = VerificationOracle(quarantine_dir=self.quarantine_dir)
+
+        # Case 1: mismatching code should produce a non-verified result with diagnostics
+        mismatch_code = (
+            "def solve(nums):\n    return sum(nums) + 99\n\n"
+            "def solve_brute(nums):\n    return sum(nums)\n\n"
+            "import random\n"
+            "def generate_test_cases(seed, scale):\n"
+            "    random.seed(seed)\n"
+            "    if scale == 'small':\n"
+            "        return [([random.randint(1, 5) for _ in range(3)],) for _ in range(3)]\n"
+            "    else:\n"
+            "        return [([random.randint(1, 5) for _ in range(100)],) for _ in range(2)]\n"
+        )
+        res_fail = oracle.verify(mismatch_code, seed=42)
+        self.assertFalse(res_fail["verified"])
+        self.assertIn("rejection_diagnostics", res_fail)
+        diag_fail = res_fail["rejection_diagnostics"]
+        # Required keys must all be present
+        for key in [
+            "syntax_category", "parse_failure_location", "phase_a_mismatch_type",
+            "phase_b_failure", "is_timeout", "is_memory", "is_duplicate",
+            "is_security", "is_anti_cheat",
+        ]:
+            self.assertIn(key, diag_fail, f"Missing key '{key}' in rejection_diagnostics")
+        # A Phase A mismatch should be classified correctly
+        self.assertEqual(diag_fail["phase_a_mismatch_type"], "output_mismatch")
+        self.assertFalse(diag_fail["is_security"])
+        self.assertFalse(diag_fail["is_anti_cheat"])
+
+        # Case 2: valid code should also carry the key (all-"none" sentinel)
+        valid_code = (
+            "def solve(nums):\n    return sum(nums)\n\n"
+            "def solve_brute(nums):\n    s = 0\n    for x in nums:\n        s += x\n    return s\n\n"
+            "import random\n"
+            "def generate_test_cases(seed, scale):\n"
+            "    random.seed(seed)\n"
+            "    if scale == 'small':\n"
+            "        return [([random.randint(1, 10) for _ in range(5)],) for _ in range(3)]\n"
+            "    else:\n"
+            "        return [([random.randint(1, 10) for _ in range(100)],) for _ in range(2)]\n"
+        )
+        res_ok = oracle.verify(valid_code, seed=42)
+        self.assertTrue(res_ok["verified"])
+        self.assertIn("rejection_diagnostics", res_ok)
+        diag_ok = res_ok["rejection_diagnostics"]
+        self.assertEqual(diag_ok["syntax_category"], "none")
+        self.assertEqual(diag_ok["phase_a_mismatch_type"], "none")
+        self.assertEqual(diag_ok["phase_b_failure"], "none")
+        self.assertFalse(diag_ok["is_timeout"])
+        self.assertFalse(diag_ok["is_memory"])
 
 
 if __name__ == "__main__":

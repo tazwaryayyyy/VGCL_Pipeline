@@ -361,6 +361,111 @@ class VerificationOracle:
 
         return art_id
 
+    @staticmethod
+    def _build_rejection_diagnostics(
+        reason: str,
+        ast_msg: str = "",
+        res_a: Optional[Dict[str, Any]] = None,
+        res_b: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Constructs a machine-readable rejection diagnostics dict from oracle results.
+
+        This helper is called on every non-verified return path of ``verify()``.
+        It classifies the rejection into structured categories without altering
+        any existing return keys.
+
+        Args:
+            reason:   The human-readable failure reason string already present
+                      in the return dict.
+            ast_msg:  The message from ``verify_ast_security_and_contracts``.
+            res_a:    Phase A result dict from the child process, or None.
+            res_b:    Phase B result dict from the child process, or None.
+
+        Returns:
+            A dict with stable string keys suitable for machine parsing.
+        """
+        reason_upper = reason.upper()
+        ast_upper = ast_msg.upper()
+
+        is_security = "SECURITY POLICY" in ast_upper
+        is_anti_cheat = "ANTI-CHEAT" in ast_upper
+        is_syntax_error = "SYNTAXERROR" in ast_upper
+        is_contract = "CONTRACT" in ast_upper and not is_anti_cheat
+
+        # Determine syntax category from AST message
+        if is_security:
+            syntax_category = "security_violation"
+        elif is_anti_cheat:
+            syntax_category = "anti_cheat"
+        elif is_syntax_error:
+            syntax_category = "syntax_error"
+        elif is_contract:
+            syntax_category = "contract_violation"
+        elif ast_msg:
+            syntax_category = "ast_failure"
+        else:
+            syntax_category = "none"
+
+        # Parse failure location from Phase A or AST message
+        parse_failure_location: Optional[int] = None
+        if res_a and res_a.get("failing_input"):
+            # Line number not available from subprocess; mark as None
+            parse_failure_location = None
+
+        # Phase A mismatch type
+        if res_a is not None and not res_a.get("passed", True):
+            a_reason = res_a.get("reason", "").upper()
+            if "MISMATCH" in a_reason:
+                phase_a_mismatch = "output_mismatch"
+            elif "TIMEOUT" in a_reason:
+                phase_a_mismatch = "timeout"
+            elif "EXCEPTION" in a_reason:
+                phase_a_mismatch = "exception"
+            elif "MEMORY" in a_reason:
+                phase_a_mismatch = "memory"
+            else:
+                phase_a_mismatch = "other"
+        else:
+            phase_a_mismatch = "none"
+
+        # Phase B failure type
+        if res_b is not None and not res_b.get("passed", True):
+            b_reason = res_b.get("reason", "").upper()
+            if "TIMEOUT" in b_reason or "TIME BOUND" in b_reason:
+                phase_b_failure = "timeout"
+            elif "MEMORY" in b_reason:
+                phase_b_failure = "memory"
+            elif "EXCEPTION" in b_reason:
+                phase_b_failure = "exception"
+            else:
+                phase_b_failure = "other"
+        else:
+            phase_b_failure = "none"
+
+        is_timeout = (
+            "TIMEOUT" in reason_upper
+            or phase_a_mismatch == "timeout"
+            or phase_b_failure == "timeout"
+        )
+        is_memory = (
+            "MEMORY" in reason_upper
+            or phase_a_mismatch == "memory"
+            or phase_b_failure == "memory"
+        )
+
+        return {
+            "syntax_category": syntax_category,
+            "parse_failure_location": parse_failure_location,
+            "phase_a_mismatch_type": phase_a_mismatch,
+            "phase_b_failure": phase_b_failure,
+            "is_timeout": is_timeout,
+            "is_memory": is_memory,
+            "is_duplicate": False,   # dedup is caller-side; always False here
+            "is_security": is_security,
+            "is_anti_cheat": is_anti_cheat,
+        }
+
     def verify(
         self,
         full_code: str,
@@ -372,7 +477,18 @@ class VerificationOracle:
         solve_brute: str = "",
         test_gen: str = "",
     ) -> Dict[str, Any]:
-        """Runs 2-phase differential verification engine."""
+        """Runs 2-phase differential verification engine.
+
+        Returns a dict with the following keys (unchanged from original):
+            verified, confidence, phase_a_pass, phase_a_pass_count,
+            phase_b_pass, reason, quarantine_id.
+
+        Additionally, every return path now includes:
+            rejection_diagnostics: Dict[str, Any] — structured, machine-readable
+            breakdown of why a sample was rejected, or an all-"none" dict for
+            verified samples.  This key is additive and does not affect any
+            existing caller that does not reference it.
+        """
         ast_ok, ast_msg = verify_ast_security_and_contracts(full_code)
         if not ast_ok:
             art_id = self.quarantine(
@@ -393,6 +509,9 @@ class VerificationOracle:
                 "phase_b_pass": False,
                 "reason": ast_msg,
                 "quarantine_id": art_id,
+                "rejection_diagnostics": self._build_rejection_diagnostics(
+                    reason=ast_msg, ast_msg=ast_msg
+                ),
             }
 
         ctx = mp.get_context("spawn")
@@ -441,6 +560,9 @@ class VerificationOracle:
                 "phase_b_pass": False,
                 "reason": reason,
                 "quarantine_id": art_id,
+                "rejection_diagnostics": self._build_rejection_diagnostics(
+                    reason=reason, res_a=res_a
+                ),
             }
 
         # Phase B Execution
@@ -486,6 +608,9 @@ class VerificationOracle:
                 "phase_b_pass": False,
                 "reason": reason,
                 "quarantine_id": art_id,
+                "rejection_diagnostics": self._build_rejection_diagnostics(
+                    reason=reason, res_a=res_a, res_b=res_b
+                ),
             }
 
         return {
@@ -496,6 +621,17 @@ class VerificationOracle:
             "phase_b_pass": True,
             "reason": "VERIFICATION_SUCCESS",
             "quarantine_id": None,
+            "rejection_diagnostics": {
+                "syntax_category": "none",
+                "parse_failure_location": None,
+                "phase_a_mismatch_type": "none",
+                "phase_b_failure": "none",
+                "is_timeout": False,
+                "is_memory": False,
+                "is_duplicate": False,
+                "is_security": False,
+                "is_anti_cheat": False,
+            },
         }
 
 
