@@ -1,4 +1,4 @@
-# VGCL Phase 0: Reproducibility Protocol & External Audit Specification
+﻿# VGCL Phase 0: Reproducibility Protocol & External Audit Specification
 
 This repository implements a **causally identifiable verification-guided curriculum learning (VGCL) experimental framework** designed for rigorous scientific verification, audit, and replication.
 
@@ -163,15 +163,51 @@ All model fine-tuning experiments MUST adhere to the following pre-registered hy
 
 ---
 
-## VI. Generator Model Policy & Reproducibility Limitations
+## VI. Generator Model Policy, Threshold Calibration & Reproducibility Limitations
 
 ### Generator Model Policy
-- **Primary Generator**: `gemini-3.6-flash`
-- **Fallback Priority**: `["gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-flash-latest"]`
-- **Auditability**: The exact model serving each API response is recorded per-call in quarantine JSON artifacts and ledger database entries (`generator_model`).
-- **Symmetry**: Both targeted and uniform generation loops share the identical model priority list, fallback routing, client-side rate pacing (15 RPM), and temperature configuration (0.4).
+
+The main experiment uses an explicit, auditable generator policy declared in `EXPERIMENTAL_GENERATOR_POLICY` (sourced from `targeted_generation.py`, shared by `uniform_generation.py`):
+
+- **Primary model**: `gemini-3.6-flash`
+- **Fallback sequence** (free-tier quota failover only): `gemini-3.1-flash-lite` → `gemini-3.5-flash-lite` → `gemini-flash-latest`
+- **Temperature**: `0.4`
+- **Client timeout**: `30.0s`
+- **Auditability**: Every API call returns the actual serving model name. That model name is recorded in all quarantine artifacts and in the `generator_model` field of every ledger entry. Fallback transitions are logged to stdout with `[FALLBACK-ROUTING]`.
+- **Symmetry**: Targeted and uniform generation import `EXPERIMENTAL_GENERATOR_POLICY` and `_MODEL_PRIORITY` from the same source (`targeted_generation.py`). They are structurally identical objects (tested by `test_18`). No model-asymmetry exists between conditions.
+- **Scientific note**: Different fallback models are not interchangeable. Their identities remain visible in the ledger. Post-hoc model normalization is prohibited.
+
+### Reference-Independence Threshold Calibration
+
+- **Threshold**: `0.85` (frozen before main curriculum generation)
+- **Method**: Normalized AST n-gram Jaccard token similarity on function-only canonical AST (`compute_ast_hashes` + `compute_structural_similarity` in `cfg_dedup.py`), applied to `solve` vs `solve_brute` only.
+- **Calibration fixture**: `phase0_calibration/reference_fixture.py`
+- **Fixture hash**: `707762ab31720b7c` (SHA-256 prefix of concatenated pair content)
+- **Fixture result**: 11/11 assertions passed at threshold 0.85. All duplicate/near-duplicate classes score ≥ 0.85 (REJECT). All structurally distinct classes score < 0.06 (PASS). Threshold cleanly separates the two groups.
+- **Fixture independence**: The fixture contains only synthetic engineering pairs constructed for threshold validation. It is independent of the MBPP calibration split, the HumanEval/MBPP-test evaluation sets, and any generated curriculum samples.
+- **Freeze rule**: The threshold is frozen at `0.85` for the duration of Phase 0. Threshold adaptation based on accepted curriculum samples is prohibited. Any future change requires a new freeze revision.
+
+### Generation Manifest
+
+Before curriculum generation begins, `generation_manifest.py` writes `data/generation_manifest.json` (targeted) and `data/generation_manifest_uniform.json` (uniform). Each manifest answers:
+
+| Question | Field |
+|---|---|
+| Which commit? | `code_commit` |
+| Which freeze tag? | `freeze_tag` |
+| Which generator model? | `generator_model` |
+| Which fallback policy? | `fallback_policy` |
+| Which temperature? | `generation_parameters.temperature` |
+| Which RPM limit? | `rpm_limit` |
+| Which batch size? | `batch_size` |
+| Which quality-gate versions? | `quality_gate_versions` |
+| Which dedup threshold? | `dedup_threshold` |
+| Which calibration fixture? | `reference_calibration_fixture_hash` |
+| Which reference-independence threshold? | `reference_independence_threshold` |
+| Which seed policy? | `random_seed_policy` |
 
 ### Remaining Reproducibility Limitations
-1. **API Non-Determinism**: Upstream hosted LLM sampling exhibits minor non-determinism even at fixed temperature and seed parameters.
-2. **Process Resource Limits**: OS-level RLIMIT CPU/memory enforcement depends on POSIX `resource` availability and falls back gracefully under Windows environments.
-3. **Pre-Experiment Freeze**: Quality gates, ledger schema, rate controls, and test suites are frozen at revision `phase0-experiment-freeze-v3`.
+1. **API Non-Determinism**: Upstream hosted LLM sampling exhibits minor non-determinism even at fixed temperature and seed parameters. Gemini output is not deterministic.
+2. **Fallback model activation**: When the primary model is quota-exhausted, a declared fallback model serves the request. The fallback model identity is recorded in the ledger, not masked. This is an operational reliability measure; different fallback models are not scientifically equivalent.
+3. **Process Resource Limits**: OS-level RLIMIT CPU/memory enforcement depends on POSIX `resource` availability and falls back gracefully under Windows environments.
+4. **Pre-Experiment Freeze**: Quality gates, ledger schema, rate controls, and test suites are frozen at revision `phase0-experiment-freeze-v4`.

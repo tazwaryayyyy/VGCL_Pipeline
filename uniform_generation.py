@@ -31,7 +31,15 @@ from syntax_repair import (
     identify_malformed_component,
     regenerate_syntax_component,
 )
-from targeted_generation import _call_llm_paced, calibrate_empirical_difficulty, client_side_pace, parse_block_content
+from generation_manifest import create_generation_manifest
+from targeted_generation import (
+    EXPERIMENTAL_GENERATOR_POLICY,
+    _MODEL_PRIORITY,
+    _call_llm_paced,
+    calibrate_empirical_difficulty,
+    client_side_pace,
+    parse_block_content,
+)
 
 load_dotenv()
 
@@ -135,6 +143,8 @@ def run_uniform_generation_pipeline(
                      a private instance is created and flushed on completion.
     """
     print("=== STARTING UNIFORM SAMPLING CONTROL GENERATION PIPELINE ===")
+    manifest = create_generation_manifest(output_path="data/generation_manifest_uniform.json")
+    print(f"  [MANIFEST] Frozen manifest recorded (Freeze: {manifest.get('freeze_tag')}, Primary Model: {manifest.get('generator_model')})")
 
     oracle = VerificationOracle(quarantine_dir="data/quarantine_uniform")
     dedup = StructuralDeduplicationEngine(similarity_threshold=0.70)

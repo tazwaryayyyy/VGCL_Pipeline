@@ -1,4 +1,4 @@
-# VGCL Phase 0 Experiment Freeze
+﻿# VGCL Phase 0 Experiment Freeze
 
 Freeze version:
 phase0-experiment-freeze-v2
@@ -132,6 +132,86 @@ Test Status:
 30 integration tests passing (0 failures, 0 errors).
 py_compile: passed.
 git diff --check: passed.
+
+Repository status:
+Frozen for Phase 0 curriculum generation.
+
+---
+
+# Freeze Revision: phase0-experiment-freeze-v4
+
+Freeze version:
+phase0-experiment-freeze-v4
+
+Previous freeze:
+phase0-experiment-freeze-v3
+
+Reason for revision:
+Lock Phase 0 experimental generation configuration.
+Introduces explicit auditable EXPERIMENTAL_GENERATOR_POLICY, pre-experiment threshold calibration fixture,
+and frozen generation manifest. No scientific invariants changed.
+
+Commit:
+(see git log — commit "Lock Phase 0 experimental generation configuration")
+
+Date:
+2026-08-16
+
+Base model:
+Qwen-2.5-1.5B-Instruct
+
+Generator model policy:
+Primary: gemini-3.6-flash
+Fallback sequence (free-tier quota failover): gemini-3.1-flash-lite → gemini-3.5-flash-lite → gemini-flash-latest
+Policy declaration: EXPERIMENTAL_GENERATOR_POLICY in targeted_generation.py (imported identically by uniform_generation.py)
+Enforcement: _MODEL_PRIORITY is constructed from EXPERIMENTAL_GENERATOR_POLICY; tested by test_16, test_17, test_18.
+Fallback activation is logged with [FALLBACK-ROUTING]; model identity recorded in every ledger entry and quarantine artifact.
+Different fallback models are not interchangeable; post-hoc normalization is prohibited.
+
+Reference-independence threshold:
+0.85
+
+Threshold calibration:
+Fixture file: phase0_calibration/reference_fixture.py
+Fixture hash: 707762ab31720b7c
+Fixture pairs: 11 total (Class 1-6 coverage)
+Result: 11/11 assertions passed.
+Duplicate/near-duplicate classes: min score 1.0000, max score 1.0000 — all REJECT at 0.85.
+Distinct algorithm classes: max score 0.0507 — all PASS at 0.85.
+Threshold cleanly separates both groups with no borderline ambiguity.
+Fixture is independent of MBPP calibration, HumanEval, MBPP-test, and any curriculum samples.
+Threshold is frozen. Adaptation based on curriculum samples is prohibited.
+
+Generation configuration file:
+phase0_calibration/config.yaml (extended with experimental_generator_policy and generation_configuration blocks)
+Reference: generation_manifest.py produces data/generation_manifest.json at pipeline start.
+
+Calibration dataset:
+MBPP train split only (disjoint from evaluation sets)
+
+Evaluation datasets:
+HumanEval, MBPP test
+
+Quality Gates & Verification:
+1. Pre-oracle syntax validation with 1-shot component-level LLM regeneration retry.
+2. Optimized/reference structural independence gate (0.85 normalized AST n-gram similarity threshold, AST/CFG shape isomorphism check).
+3. Subtype validity gate (deterministic AST evidence for Types A-F; NOT_VALIDATABLE for uniform/unstratified identifiers).
+4. Two-phase differential verification oracle with complexity-aware Phase A scaling (N<=5 for recursive/combinatorial brute; N<=8 default) and Phase B (N>=100).
+5. Structural corpus deduplication (AST/CFG similarity < 0.70).
+6. Permanent quarantine protocol with structured rejection diagnostics.
+
+New in this revision:
+- generation_manifest.py: auditable manifest written before every generation run.
+- phase0_calibration/reference_fixture.py: deterministic pre-experiment threshold calibration fixture.
+- phase0_calibration/config.yaml: extended with experimental_generator_policy and generation_configuration.
+- EXPERIMENTAL_GENERATOR_POLICY: explicit named constant replacing implicit _MODEL_PRIORITY construction.
+- Fallback routing: explicit [FALLBACK-ROUTING] log on every model switch; rate-limit detection broadened to include resource_exhausted and rate limit keywords.
+
+Test Status:
+37 integration tests passing (0 failures, 0 errors).
+py_compile: passed for all 12 modules including generation_manifest.py.
+git diff --check: passed.
+Calibration fixture: 11/11 assertions passed.
 
 Repository status:
 Frozen for Phase 0 curriculum generation.

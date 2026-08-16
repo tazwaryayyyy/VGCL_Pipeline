@@ -1,4 +1,4 @@
-calibration_dataset:
+﻿calibration_dataset:
   name: "google-research-datasets/mbpp"
   split: "train"
   version: "sanitized"
@@ -12,3 +12,27 @@ evaluation_dataset:
     - name: "google-research-datasets/mbpp"
       split: "test"
       version: "sanitized"
+
+experimental_generator_policy:
+  primary_model: "gemini-3.6-flash"
+  fallback_models:
+    - "gemini-3.1-flash-lite"
+    - "gemini-3.5-flash-lite"
+    - "gemini-flash-latest"
+  temperature: 0.4
+  timeout_seconds: 30.0
+
+generation_configuration:
+  freeze_tag: "phase0-experiment-freeze-v4"
+  rpm_limit: 15.0
+  batch_size: 1
+  syntax_retry_limit: 1
+  reference_independence_threshold: 0.85
+  reference_calibration_fixture_hash: "707762ab31720b7c"
+  dedup_threshold: 0.70
+  phase_a_policy_identifier: "complexity_aware_adaptive_v1"
+  targeted_subtype_allocation_policy: "stratified_strata_lowest_accepted_adaptive"
+  uniform_selection_policy: "round_robin_unstratified"
+  seed_policy:
+    targeted_initial_seed: 1000
+    uniform_initial_seed: 5000

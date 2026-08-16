@@ -1,4 +1,4 @@
-# Verification-Guided Curriculum Learning (VGCL) Phase 0
+﻿# Verification-Guided Curriculum Learning (VGCL) Phase 0
 
 ## Project Overview
 
@@ -93,6 +93,33 @@ python -m unittest test_phase0_pipeline.py
 
 - **Targeted Pipeline (`targeted_generation.py`)**: Prompts candidate problems targeted specifically at empirical execution failure clusters (`FC_01`..`FC_08`).
 - **Uniform Control Pipeline (`uniform_generation.py`)**: Identical generator model, decoupled 2-pass oracle, deduplication, ledger schema, and rate control, differing **only** by sampling uniformly across failure categories without failure targeting.
+
+## Generator Model Policy (Frozen at phase0-experiment-freeze-v4)
+
+Both pipelines use the same explicit `EXPERIMENTAL_GENERATOR_POLICY`:
+
+| Parameter | Value |
+|---|---|
+| Primary model | `gemini-3.6-flash` |
+| Fallback sequence | `gemini-3.1-flash-lite` → `gemini-3.5-flash-lite` → `gemini-flash-latest` |
+| Temperature | `0.4` |
+| Rate limit | `15 RPM` |
+
+- Fallback is free-tier quota failover only. Every API call records the actual serving model in quarantine artifacts and the ledger `generator_model` field.
+- Different fallback models are **not scientifically equivalent**. Their identities remain visible; no post-hoc normalization is performed.
+- Both pipelines import `EXPERIMENTAL_GENERATOR_POLICY` and `_MODEL_PRIORITY` from `targeted_generation.py` — they are the same objects, verified by `test_18`.
+
+## Reference-Independence Threshold (Frozen at 0.85)
+
+The 0.85 threshold was validated by a pre-experiment calibration fixture (`phase0_calibration/reference_fixture.py`) before any curriculum was generated:
+
+- **Fixture hash**: `707762ab31720b7c`
+- **Result**: 11/11 assertions passed. All duplicate/near-duplicate pairs → REJECT (scores 1.0). All structurally distinct pairs → PASS (scores ≤ 0.05). No borderline ambiguity.
+- **Fixture independence**: Synthetic engineering pairs only — independent of MBPP, HumanEval, and any curriculum data.
+
+## Auditable Generation Manifest
+
+Before generation, `generation_manifest.py` writes `data/generation_manifest.json` capturing: commit hash, freeze tag, generator model, fallback policy, temperature, RPM limit, batch size, quality-gate versions, thresholds, calibration fixture hash, and seed policies.
 
 ## Throughput Optimization & Quality Gates Status
 

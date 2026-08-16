@@ -1,4 +1,4 @@
-"""test_phase0_pipeline.py
+﻿"""test_phase0_pipeline.py
 
 Comprehensive Phase 0 Integration Test Suite.
 Validates end-to-end functionality across all 8 core Phase 0 modules:
@@ -741,6 +741,106 @@ class TestPhase0Pipeline(unittest.TestCase):
         self.assertFalse(case_within_phase_a_policy(([1, 2, 3, 4, 5, 6],), pol5))
         self.assertTrue(case_within_phase_a_policy(([1, 2, 3, 4, 5, 6, 7, 8],), pol8))
         self.assertFalse(case_within_phase_a_policy(([1, 2, 3, 4, 5, 6, 7, 8, 9],), pol8))
+
+    # ------------------------------------------------------------------
+    # Tests 16-21: Generator Policy, Symmetry, Ledger, Freeze, Manifest,
+    #              and Threshold Calibration Fixture
+    # ------------------------------------------------------------------
+
+    def test_16_generator_policy_primary_model_is_declared(self):
+        """Test 16: EXPERIMENTAL_GENERATOR_POLICY primary model is gemini-3.6-flash."""
+        from targeted_generation import EXPERIMENTAL_GENERATOR_POLICY, _MODEL_PRIORITY
+        self.assertEqual(EXPERIMENTAL_GENERATOR_POLICY["primary_model"], "gemini-3.6-flash")
+        # Primary model must be first in the priority list
+        self.assertEqual(_MODEL_PRIORITY[0], EXPERIMENTAL_GENERATOR_POLICY["primary_model"])
+
+    def test_17_fallback_policy_order_matches_declaration(self):
+        """Test 17: _MODEL_PRIORITY follows the declared fallback order."""
+        from targeted_generation import EXPERIMENTAL_GENERATOR_POLICY, _MODEL_PRIORITY
+        expected = [EXPERIMENTAL_GENERATOR_POLICY["primary_model"]] + list(
+            EXPERIMENTAL_GENERATOR_POLICY["fallback_models"]
+        )
+        self.assertEqual(_MODEL_PRIORITY, expected)
+
+    def test_18_targeted_and_uniform_share_identical_model_policy(self):
+        """Test 18: Targeted and uniform use the same EXPERIMENTAL_GENERATOR_POLICY and _MODEL_PRIORITY."""
+        from targeted_generation import EXPERIMENTAL_GENERATOR_POLICY as tgt_pol, _MODEL_PRIORITY as tgt_mp
+        from uniform_generation import EXPERIMENTAL_GENERATOR_POLICY as uni_pol, _MODEL_PRIORITY as uni_mp
+        self.assertIs(tgt_pol, uni_pol)
+        self.assertIs(tgt_mp, uni_mp)
+
+    def test_19_ledger_entry_records_generator_model(self):
+        """Test 19: Every LedgerEntry records the generator_model field."""
+        ledger = ExperimentLedger(db_path=self.db_path, jsonl_path=self.jsonl_path)
+        entry = LedgerEntry(
+            problem_id="P_MODEL_RECORD_TEST",
+            seed=99,
+            generator_model="gemini-3.6-flash",
+            target_failure_cluster="FC_01_MICRO_CORRECTNESS",
+            monotonic_queue_subtype="Type A: sliding-window extrema",
+            code_content="def solve(): pass",
+        )
+        ledger.record_entry(entry)
+        entries = ledger.get_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["generator_model"], "gemini-3.6-flash")
+
+    def test_20_freeze_config_reference_independence_threshold(self):
+        """Test 20: The frozen reference-independence threshold is exactly 0.85."""
+        from quality_gates import REFERENCE_INDEPENDENCE_THRESHOLD
+        from generation_manifest import FROZEN_EXPERIMENT_CONFIG
+        self.assertEqual(REFERENCE_INDEPENDENCE_THRESHOLD, 0.85)
+        self.assertEqual(FROZEN_EXPERIMENT_CONFIG["reference_independence_threshold"], 0.85)
+
+    def test_21_generation_manifest_records_config_identity(self):
+        """Test 21: Generation manifest captures freeze_tag, generator_model, and calibration fixture hash."""
+        from generation_manifest import create_generation_manifest
+        manifest = create_generation_manifest(output_path=None)
+        self.assertIn("freeze_tag", manifest)
+        self.assertIn("generator_model", manifest)
+        self.assertIn("reference_independence_threshold", manifest)
+        self.assertIn("reference_calibration_fixture_hash", manifest)
+        self.assertEqual(manifest["reference_independence_threshold"], 0.85)
+        self.assertEqual(manifest["reference_calibration_fixture_hash"], "707762ab31720b7c")
+        self.assertEqual(manifest["generator_model"], "gemini-3.6-flash")
+
+    def test_22_calibration_fixture_all_assertions_pass(self):
+        """Test 22: Pre-experiment calibration fixture passes all expected verdicts at threshold 0.85."""
+        import sys
+        import os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "phase0_calibration"))
+        from reference_fixture import run_calibration_fixture
+        report = run_calibration_fixture(threshold=0.85)
+        self.assertTrue(
+            report["all_passed"],
+            f"Calibration fixture failed: "
+            f"{report['failed_assertions']} assertion(s) failed out of {report['total_pairs']}. "
+            f"Threshold 0.85 is not supported by the fixture."
+        )
+        # Reject categories must all score >= 0.85 or be identical
+        reject_cats = [
+            "Class 1: Exact duplicate",
+            "Class 2: Identifier/literal-renamed duplicate",
+            "Class 3: Superficial formatting/comment variant",
+            "Class 4: Same computational strategy independently written",
+        ]
+        for cat in reject_cats:
+            if cat in report["category_summary"]:
+                self.assertGreaterEqual(
+                    report["category_summary"][cat]["min"], 0.85,
+                    f"Category '{cat}' has similarity < 0.85 but expected REJECT."
+                )
+        # Pass categories must all score < 0.85
+        pass_cats = [
+            "Class 5: Structurally distinct algorithms",
+            "Class 6: Structurally close but genuinely different algorithms",
+        ]
+        for cat in pass_cats:
+            if cat in report["category_summary"]:
+                self.assertLess(
+                    report["category_summary"][cat]["max"], 0.85,
+                    f"Category '{cat}' has similarity >= 0.85 but expected PASS."
+                )
 
 
 if __name__ == "__main__":

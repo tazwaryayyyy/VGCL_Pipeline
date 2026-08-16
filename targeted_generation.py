@@ -33,6 +33,8 @@ from syntax_repair import (
     regenerate_syntax_component,
 )
 
+from generation_manifest import create_generation_manifest
+
 load_dotenv()
 
 client = OpenAI(
@@ -41,12 +43,20 @@ client = OpenAI(
     timeout=30.0,
 )
 
-_MODEL_PRIORITY = [
-    "gemini-3.6-flash",
-    "gemini-3.1-flash-lite",
-    "gemini-3.5-flash-lite",
-    "gemini-flash-latest",
-]
+EXPERIMENTAL_GENERATOR_POLICY: Dict[str, Any] = {
+    "primary_model": "gemini-3.6-flash",
+    "fallback_models": [
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash-lite",
+        "gemini-flash-latest",
+    ],
+    "temperature": 0.4,
+    "timeout_seconds": 30.0,
+}
+
+_MODEL_PRIORITY: List[str] = [
+    EXPERIMENTAL_GENERATOR_POLICY["primary_model"]
+] + list(EXPERIMENTAL_GENERATOR_POLICY["fallback_models"])
 
 SUBTYPES = [
     "Type A: sliding-window extrema",
@@ -238,26 +248,35 @@ class SubtypeScheduler:
             print(f"  [SCHEDULER] Warning: could not write weight log to '{path}': {exc}")
 
 
-def _call_llm_paced(system_prompt: str, user_prompt: str) -> Tuple[str, str, float, int]:
-    """Paced LLM call with metadata logging."""
+def _call_llm_paced(
+    system_prompt: str,
+    user_prompt: str,
+    model_priority: Optional[List[str]] = None,
+    client_override: Optional[Any] = None,
+) -> Tuple[str, str, float, int]:
+    """Paced LLM call with metadata logging and explicit fallback routing."""
     last_exception = ""
     start_t = time.perf_counter()
     retries = 0
     api_calls = 0
+    cli = client_override if client_override is not None else client
+    models = model_priority if model_priority is not None else _MODEL_PRIORITY
 
-    for model in _MODEL_PRIORITY:
+    for idx, model in enumerate(models):
+        if idx > 0:
+            print(f"  [FALLBACK-ROUTING] Attempting declared fallback model [{idx}]: {model}", flush=True)
         for attempt in range(3):
             client_side_pace()
             try:
                 t0 = time.perf_counter()
                 api_calls += 1
-                response = client.chat.completions.create(
+                response = cli.chat.completions.create(
                     model=model,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
-                    temperature=0.4,
+                    temperature=EXPERIMENTAL_GENERATOR_POLICY.get("temperature", 0.4),
                 )
                 latency = time.perf_counter() - t0
                 text = response.choices[0].message.content or ""
@@ -266,13 +285,14 @@ def _call_llm_paced(system_prompt: str, user_prompt: str) -> Tuple[str, str, flo
                 retries += 1
                 last_exception = f"[{model}] {e}"
                 err_str = str(e).lower()
-                if "429" in err_str or "quota" in err_str:
+                if "429" in err_str or "quota" in err_str or "rate limit" in err_str or "resource_exhausted" in err_str:
                     time.sleep(5.0 * (2 ** attempt))
                     continue
                 break
 
     total_lat = time.perf_counter() - start_t
     return f"LLM Generation Exception: {last_exception}", "failed_model", total_lat, api_calls
+
 
 
 def parse_block_content(raw_text: str, header: str) -> str:
@@ -407,6 +427,8 @@ def run_targeted_generation_pipeline(
                              ``None``, a private run-scoped collector is used.
     """
     print(f"=== STARTING TARGETED CURRICULUM GENERATION FOR CLUSTER: {target_cluster} ===")
+    manifest = create_generation_manifest(output_path="data/generation_manifest.json")
+    print(f"  [MANIFEST] Frozen manifest recorded (Freeze: {manifest.get('freeze_tag')}, Primary Model: {manifest.get('generator_model')})")
 
     oracle = VerificationOracle()
     dedup = StructuralDeduplicationEngine(similarity_threshold=0.70)
