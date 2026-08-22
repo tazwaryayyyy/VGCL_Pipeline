@@ -21,7 +21,7 @@ import yaml
 
 
 FROZEN_EXPERIMENT_CONFIG: Dict[str, Any] = {
-    "freeze_tag": "phase0-experiment-freeze-v4",
+    "freeze_tag": "phase0-experiment-freeze-v5",
     "generator_model": "gemini-3.6-flash",
     "fallback_policy": [
         "gemini-3.1-flash-lite",
@@ -41,11 +41,13 @@ FROZEN_EXPERIMENT_CONFIG: Dict[str, Any] = {
     "quality_gate_versions": {
         "reference_independence": "0.85_ast_ngram",
         "subtype_validation": "types_a_f_ast_features_v1",
-        "phase_a_scaling": "complexity_aware_adaptive_v1",
+        "phase_a_scaling": "complexity_aware_adaptive_v2_explicit_cap",
+        "phase_b_constraint_validation": "multiscale_regime_validation_v1",
         "syntax_repair": "1shot_component_repair_v1",
     },
     "dedup_threshold": 0.70,
-    "phase_a_policy_identifier": "complexity_aware_adaptive_v1",
+    "phase_a_policy_identifier": "complexity_aware_adaptive_v2_explicit_cap",
+    "phase_b_policy_identifier": "multiscale_regime_validation_v1",
     "targeted_subtype_allocation_policy": "stratified_strata_lowest_accepted_adaptive",
     "uniform_selection_policy": "round_robin_unstratified",
     "seed_policy": {

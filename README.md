@@ -1,4 +1,4 @@
-﻿# Verification-Guided Curriculum Learning (VGCL) Phase 0
+# Verification-Guided Curriculum Learning (VGCL) Phase 0
 
 ## Project Overview
 
@@ -94,7 +94,7 @@ python -m unittest test_phase0_pipeline.py
 - **Targeted Pipeline (`targeted_generation.py`)**: Prompts candidate problems targeted specifically at empirical execution failure clusters (`FC_01`..`FC_08`).
 - **Uniform Control Pipeline (`uniform_generation.py`)**: Identical generator model, decoupled 2-pass oracle, deduplication, ledger schema, and rate control, differing **only** by sampling uniformly across failure categories without failure targeting.
 
-## Generator Model Policy (Frozen at phase0-experiment-freeze-v4)
+## Generator Model Policy (Frozen at phase0-experiment-freeze-v5)
 
 Both pipelines use the same explicit `EXPERIMENTAL_GENERATOR_POLICY`:
 

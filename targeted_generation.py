@@ -248,23 +248,43 @@ class SubtypeScheduler:
             print(f"  [SCHEDULER] Warning: could not write weight log to '{path}': {exc}")
 
 
+def classify_api_error(exc: Exception) -> Tuple[str, str]:
+    """Classifies an API exception into standardized error category and reason."""
+    err_str = str(exc).lower()
+    exc_type = type(exc).__name__
+
+    if "quota" in err_str or "resource_exhausted" in err_str or "quota_exceeded" in err_str:
+        return "quota_exhaustion", f"quota_exhaustion: {exc_type}: {str(exc)[:120]}"
+    elif "429" in err_str or "rate limit" in err_str or "ratelimit" in err_str or "too many requests" in err_str:
+        return "rate_limit", f"rate_limit: {exc_type}: {str(exc)[:120]}"
+    elif any(k in err_str for k in ("500", "502", "503", "504", "server unavailable", "service unavailable", "timeout", "timed out", "connection error", "connection reset", "overloaded")):
+        return "transient_server_failure", f"transient_server_failure: {exc_type}: {str(exc)[:120]}"
+    elif any(k in err_str for k in ("400", "401", "403", "404", "invalid_argument", "bad request", "permission_denied", "unauthorized")):
+        return "request_rejection", f"request_rejection: {exc_type}: {str(exc)[:120]}"
+    else:
+        return "unknown", f"unknown: {exc_type}: {str(exc)[:120]}"
+
+
 def _call_llm_paced(
     system_prompt: str,
     user_prompt: str,
     model_priority: Optional[List[str]] = None,
     client_override: Optional[Any] = None,
+    metrics: Optional[PipelineMetrics] = None,
 ) -> Tuple[str, str, float, int]:
     """Paced LLM call with metadata logging and explicit fallback routing."""
     last_exception = ""
     start_t = time.perf_counter()
-    retries = 0
     api_calls = 0
     cli = client_override if client_override is not None else client
     models = model_priority if model_priority is not None else _MODEL_PRIORITY
+    fallback_reason = ""
 
     for idx, model in enumerate(models):
         if idx > 0:
-            print(f"  [FALLBACK-ROUTING] Attempting declared fallback model [{idx}]: {model}", flush=True)
+            print(f"  [FALLBACK-ROUTING] Attempting declared fallback model [{idx}]: {model} (Reason: {fallback_reason})", flush=True)
+            if metrics:
+                metrics.record_fallback_event(reason=fallback_reason)
         for attempt in range(3):
             client_side_pace()
             try:
@@ -282,8 +302,10 @@ def _call_llm_paced(
                 text = response.choices[0].message.content or ""
                 return text, model, latency, api_calls
             except Exception as e:
-                retries += 1
-                last_exception = f"[{model}] {e}"
+                err_class, fallback_reason = classify_api_error(e)
+                if metrics:
+                    metrics.record_api_event(err_class, reason=fallback_reason)
+                last_exception = f"[{model}] {fallback_reason}"
                 err_str = str(e).lower()
                 if "429" in err_str or "quota" in err_str or "rate limit" in err_str or "resource_exhausted" in err_str:
                     time.sleep(5.0 * (2 ** attempt))
@@ -319,6 +341,7 @@ def generate_targeted_candidate(
     cluster_id: str,
     subtype: str,
     seed: int,
+    metrics: Optional[PipelineMetrics] = None,
 ) -> Tuple[bool, Dict[str, str], str, float, int]:
     """
     Decoupled 2-Pass Generation Pipeline (Oracle Independence - Invariant III).
@@ -343,14 +366,15 @@ def generate_targeted_candidate(
         "    <Optimal implementation>\n\n"
         "### TEST_GENERATOR\n"
         "import random\n"
-        "def generate_test_cases(seed: int, scale: str) -> list:\n"
+        "def generate_test_cases(seed: int, scale: str, max_small_dimension: int = 8) -> list:\n"
         "    # Line 1 MUST be: random.seed(seed)\n"
         "    # Return list of argument tuples matching 'solve' positional arguments\n"
-        "    # scale=='small': N <= 8; scale=='large': N >= 100\n"
+        "    # scale=='small': dimensions <= max_small_dimension (default 8, or bounded cap if specified);\n"
+        "    # scale=='large': derive dimensions from declared problem scale constraints (e.g. N >= 100)\n"
     )
     user_pass1 = f"Generate problem spec, optimal solution, and test generator for {cluster_id} (Seed {seed})."
 
-    raw_p1, model1, lat1, ret1 = _call_llm_paced(system_pass1, user_pass1)
+    raw_p1, model1, lat1, ret1 = _call_llm_paced(system_pass1, user_pass1, metrics=metrics)
 
     spec = parse_block_content(raw_p1, "### PROBLEM_SPEC")
     solve_opt = parse_block_content(raw_p1, "### SOLVE_OPTIMIZED")
@@ -375,7 +399,7 @@ def generate_targeted_candidate(
     )
     user_pass2 = f"Here is the problem specification:\n\n{spec}\n\nWrite 'solve_brute' for this spec."
 
-    raw_p2, model2, lat2, ret2 = _call_llm_paced(system_pass2, user_pass2)
+    raw_p2, model2, lat2, ret2 = _call_llm_paced(system_pass2, user_pass2, metrics=metrics)
     solve_brute = parse_block_content(raw_p2, "### SOLVE_BRUTE")
 
     if not solve_brute:
@@ -472,6 +496,7 @@ def run_targeted_generation_pipeline(
                 cluster_id=cluster_id,
                 subtype=subtype,
                 seed=b_seed,
+                metrics=metrics,
             )
             return b_seed, subtype, ok, blocks, model_name, latency, retries
 
@@ -506,6 +531,7 @@ def run_targeted_generation_pipeline(
             metrics.record_attempt(subtype=subtype, cluster=target_cluster)
             metrics.record_gen_latency(latency)
             metrics.record_initial_generation_api_calls(api_calls)
+            metrics.record_model_serving(model_name)
 
             print(
                 f"\n[+] Processing Sample [{accepted + 1}/{num_samples}] "
@@ -622,6 +648,7 @@ def run_targeted_generation_pipeline(
                 solve_opt=blocks["solve_opt"],
                 solve_brute=blocks["solve_brute"],
                 test_gen=blocks["test_gen"],
+                spec=blocks["spec"],
             )
             metrics.record_verification_latency(time.perf_counter() - ver_t0)
 

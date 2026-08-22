@@ -58,6 +58,7 @@ UNIFORM_CLUSTERS = [
 def generate_uniform_candidate(
     cluster_id: str,
     seed: int,
+    metrics: Optional[PipelineMetrics] = None,
 ) -> Tuple[bool, Dict[str, str], str, float, int]:
     """
     Decoupled 2-Pass Generation Pipeline (Control Condition - Invariant V).
@@ -76,14 +77,15 @@ def generate_uniform_candidate(
         "    <Optimal implementation>\n\n"
         "### TEST_GENERATOR\n"
         "import random\n"
-        "def generate_test_cases(seed: int, scale: str) -> list:\n"
+        "def generate_test_cases(seed: int, scale: str, max_small_dimension: int = 8) -> list:\n"
         "    # Line 1 MUST be: random.seed(seed)\n"
         "    # Return list of argument tuples matching 'solve' positional arguments\n"
-        "    # scale=='small': N <= 8; scale=='large': N >= 100\n"
+        "    # scale=='small': dimensions <= max_small_dimension (default 8, or bounded cap if specified);\n"
+        "    # scale=='large': derive dimensions from declared problem scale constraints (e.g. N >= 100)\n"
     )
     user_pass1 = f"Generate a general algorithmic problem package (Seed {seed})."
 
-    raw_p1, model1, lat1, ret1 = _call_llm_paced(system_pass1, user_pass1)
+    raw_p1, model1, lat1, ret1 = _call_llm_paced(system_pass1, user_pass1, metrics=metrics)
 
     spec = parse_block_content(raw_p1, "### PROBLEM_SPEC")
     solve_opt = parse_block_content(raw_p1, "### SOLVE_OPTIMIZED")
@@ -108,7 +110,7 @@ def generate_uniform_candidate(
     )
     user_pass2 = f"Here is the problem specification:\n\n{spec}\n\nWrite 'solve_brute' for this spec."
 
-    raw_p2, model2, lat2, ret2 = _call_llm_paced(system_pass2, user_pass2)
+    raw_p2, model2, lat2, ret2 = _call_llm_paced(system_pass2, user_pass2, metrics=metrics)
     solve_brute = parse_block_content(raw_p2, "### SOLVE_BRUTE")
 
     if not solve_brute:
@@ -175,6 +177,7 @@ def run_uniform_generation_pipeline(
             ok, blocks, model_name, latency, retries = generate_uniform_candidate(
                 cluster_id=cluster_id,
                 seed=b_seed,
+                metrics=metrics,
             )
             return b_seed, cluster_id, ok, blocks, model_name, latency, retries
 
@@ -209,6 +212,7 @@ def run_uniform_generation_pipeline(
             metrics.record_attempt(cluster=cluster_id)
             metrics.record_gen_latency(latency)
             metrics.record_initial_generation_api_calls(api_calls)
+            metrics.record_model_serving(model_name)
 
             print(
                 f"\n[+] Generating Uniform Sample [{accepted + 1}/{num_samples}] "
@@ -321,6 +325,7 @@ def run_uniform_generation_pipeline(
                 solve_opt=blocks["solve_opt"],
                 solve_brute=blocks["solve_brute"],
                 test_gen=blocks["test_gen"],
+                spec=blocks["spec"],
             )
             metrics.record_verification_latency(time.perf_counter() - ver_t0)
 

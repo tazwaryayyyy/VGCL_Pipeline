@@ -251,3 +251,222 @@ def _max_dimension(value: Any) -> int:
 def case_within_phase_a_policy(args: Any, policy: Dict[str, Any]) -> bool:
     limit = int(policy.get("maximum_dimension", 8))
     return _max_dimension(args) <= limit
+
+
+def extract_declared_constraints(spec: str) -> Dict[str, Any]:
+    """Extracts machine-readable scale and resource constraints from problem specification."""
+    import re
+    text = spec or ""
+
+    # 1. Parse max_n / dimension constraints
+    max_n: Optional[int] = None
+
+    # Check scientific notation / powers: 10^5, 10**5, 2*10^5, 2e5
+    power_matches = re.findall(r"(?:(?:(\d+)\s*\*\s*)?10\^(\d+)|(?:(\d+)\s*\*\s*)?10\*\*(\d+)|(\d+)e(\d+))", text, re.IGNORECASE)
+    for m in power_matches:
+        if m[1]:  # 10^k or c*10^k
+            coeff = int(m[0]) if m[0] else 1
+            val = coeff * (10 ** int(m[1]))
+            max_n = max(max_n or 0, val)
+        elif m[3]:  # 10**k or c*10**k
+            coeff = int(m[2]) if m[2] else 1
+            val = coeff * (10 ** int(m[3]))
+            max_n = max(max_n or 0, val)
+        elif m[4] and m[5]:  # ceK
+            val = int(float(f"{m[4]}e{m[5]}"))
+            max_n = max(max_n or 0, val)
+
+    # Check direct bounds like N <= 100000, length <= 500, etc.
+    bound_patterns = [
+        r"(?:N|n|length|size|elements|items|vertices|nodes|nums|array|string)\s*(?:<=|\\le|<|up to|at most|is at most|bounded by)\s*([0-9_]+(?:\.[0-9]+)?)",
+        r"(?:<=|\\le|<)\s*([0-9_]+(?:\.[0-9]+)?)\s*(?:elements|items|length|size|operations|N|n)",
+        r"(?:max_n|maxn|max_dimension)\s*[:=]\s*([0-9_]+)",
+        r"1\s*(?:<=|\\le|<)\s*(?:N|n|length|size)\s*(?:<=|\\le|<)\s*([0-9_]+)",
+    ]
+    for pat in bound_patterns:
+        for match in re.finditer(pat, text, re.IGNORECASE):
+            raw_val = match.group(1).replace("_", "")
+            try:
+                num = int(float(raw_val))
+                if num > 0:
+                    max_n = max(max_n or 0, num)
+            except ValueError:
+                continue
+
+    if max_n is None:
+        max_n = 100000  # Conservative standard competitive programming default
+
+    # 2. Parse time limit
+    time_limit_s = 2.0
+    time_match = re.search(r"time\s*limit\s*[:=]?\s*([0-9.]+)\s*(?:s|sec|seconds)?", text, re.IGNORECASE)
+    if time_match:
+        try:
+            time_limit_s = float(time_match.group(1))
+        except ValueError:
+            pass
+
+    # 3. Parse memory limit
+    memory_limit_mb = 512.0
+    mem_match = re.search(r"memory\s*limit\s*[:=]?\s*([0-9.]+)\s*(?:mb|megabytes)?", text, re.IGNORECASE)
+    if mem_match:
+        try:
+            memory_limit_mb = float(mem_match.group(1))
+        except ValueError:
+            pass
+
+    return {
+        "max_n": max_n,
+        "time_limit_s": time_limit_s,
+        "memory_limit_mb": memory_limit_mb,
+        "summary": f"N <= {max_n}, time <= {time_limit_s}s, memory <= {memory_limit_mb}MB",
+    }
+
+
+class _ConstraintVisitor(ast.NodeVisitor):
+    def __init__(self, dominant_args: set[str]):
+        self.dominant_args = set(dominant_args)
+        self.flags: List[str] = []
+        self._loop_stack: List[ast.AST] = []
+        self._memoized = False
+        self.recursive_call_count = 0
+        self.function_name = ""
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.function_name = node.name
+        # Check decorators for memoization (e.g. @lru_cache, @cache)
+        for dec in node.decorator_list:
+            if isinstance(dec, ast.Name) and dec.id in ("cache", "lru_cache"):
+                self._memoized = True
+            elif isinstance(dec, ast.Call) and isinstance(dec.func, ast.Name) and dec.func.id in ("cache", "lru_cache"):
+                self._memoized = True
+        self.generic_visit(node)
+
+    def _is_small_constant_range(self, node: ast.AST) -> bool:
+        """Determines if a loop is over a small constant range (<= 32, e.g. alphabet or small bits)."""
+        if isinstance(node, ast.Call):
+            func_name = ""
+            if isinstance(node.func, ast.Name):
+                func_name = node.func.id
+            if func_name == "range":
+                if len(node.args) == 1 and isinstance(node.args[0], ast.Constant):
+                    if isinstance(node.args[0].value, (int, float)) and node.args[0].value <= 32:
+                        return True
+                elif len(node.args) == 2 and isinstance(node.args[0], ast.Constant) and isinstance(node.args[1], ast.Constant):
+                    if isinstance(node.args[0].value, (int, float)) and isinstance(node.args[1].value, (int, float)):
+                        if abs(node.args[1].value - node.args[0].value) <= 32:
+                            return True
+        elif isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            if len(node.elts) <= 32 and all(isinstance(e, ast.Constant) for e in node.elts):
+                return True
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and len(node.value) <= 32:
+            return True
+        return False
+
+    def visit_For(self, node: ast.For) -> None:
+        is_small = self._is_small_constant_range(node.iter)
+        if self._loop_stack and not is_small:
+            # Check if any parent loop is also not a small constant
+            if any(not self._is_small_constant_range(p.iter if isinstance(p, ast.For) else p) for p in self._loop_stack):
+                self.flags.append("nested_loop_dominant_dimension")
+        self._loop_stack.append(node)
+        self.generic_visit(node)
+        self._loop_stack.pop()
+
+    def visit_While(self, node: ast.While) -> None:
+        if self._loop_stack:
+            self.flags.append("nested_while_loop")
+        self._loop_stack.append(node)
+        self.generic_visit(node)
+        self._loop_stack.pop()
+
+    def visit_Compare(self, node: ast.Compare) -> None:
+        # Check for `item in list` inside loop over dominant dimension
+        if self._loop_stack:
+            for op, comparator in zip(node.ops, node.comparators):
+                if isinstance(op, (ast.In, ast.NotIn)):
+                    if isinstance(comparator, ast.Name) and comparator.id in self.dominant_args:
+                        self.flags.append("nested_linear_scan_in_loop")
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if isinstance(node.func, ast.Name):
+            if node.func.id == self.function_name and self.function_name:
+                self.recursive_call_count += 1
+        elif isinstance(node.func, ast.Attribute):
+            # Check for list.count() or list.index() inside loop
+            if node.func.attr in ("count", "index") and self._loop_stack:
+                if isinstance(node.func.value, ast.Name) and node.func.value.id in self.dominant_args:
+                    self.flags.append("nested_linear_scan_in_loop")
+        self.generic_visit(node)
+
+
+def check_constraint_regime_compatibility(spec: str, solve_opt: str) -> Dict[str, Any]:
+    """Deterministically validates whether optimized solution structure matches declared constraint regime."""
+    constraints = extract_declared_constraints(spec)
+    max_n = constraints.get("max_n", 100000)
+
+    try:
+        tree = ast.parse(solve_opt)
+    except SyntaxError:
+        return {
+            "status": "REJECT",
+            "declared_constraints": constraints,
+            "structural_flags": ["syntax_error"],
+            "reason": "optimized solution is not parseable",
+        }
+
+    # Find solve function arguments
+    solve_func: Optional[ast.FunctionDef] = None
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "solve":
+            solve_func = node
+            break
+
+    dominant_args = set()
+    if solve_func:
+        for arg in solve_func.args.args:
+            dominant_args.add(arg.arg)
+
+    visitor = _ConstraintVisitor(dominant_args)
+    visitor.visit(tree)
+
+    # Check for exponential recursion without memoization
+    if visitor.recursive_call_count >= 2 and not visitor._memoized:
+        visitor.flags.append("unmemoized_branching_recursion")
+
+    flags = list(dict.fromkeys(visitor.flags))  # Deduplicate preserving order
+
+    # Decision logic based on declared constraint regime
+    if max_n <= 500:
+        # Small constraint regime (e.g. N <= 500): O(N^2) or nested iteration is fully compatible and intended.
+        return {
+            "status": "PASS",
+            "declared_constraints": constraints,
+            "structural_flags": flags,
+            "reason": f"quadratic/nested iteration structure compatible with declared small constraint regime (N<={max_n})",
+        }
+
+    # Large constraint regime (N >= 5000)
+    if "unmemoized_branching_recursion" in flags:
+        return {
+            "status": "REJECT",
+            "declared_constraints": constraints,
+            "structural_flags": flags,
+            "reason": f"structural scaling incompatibility: unmemoized branching recursion detected for large constraint regime ({constraints['summary']})",
+        }
+
+    if "nested_loop_dominant_dimension" in flags or "nested_linear_scan_in_loop" in flags:
+        if max_n >= 5000:
+            return {
+                "status": "REJECT",
+                "declared_constraints": constraints,
+                "structural_flags": flags,
+                "reason": f"structural scaling incompatibility: obvious O(N^2) nested iteration detected over dominant input dimension for large constraint regime ({constraints['summary']})",
+            }
+
+    return {
+        "status": "PASS",
+        "declared_constraints": constraints,
+        "structural_flags": flags,
+        "reason": f"structural checks compatible with declared constraint regime ({constraints['summary']})",
+    }

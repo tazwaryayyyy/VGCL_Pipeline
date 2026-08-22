@@ -1,4 +1,4 @@
-﻿calibration_dataset:
+calibration_dataset:
   name: "google-research-datasets/mbpp"
   split: "train"
   version: "sanitized"
@@ -23,14 +23,15 @@ experimental_generator_policy:
   timeout_seconds: 30.0
 
 generation_configuration:
-  freeze_tag: "phase0-experiment-freeze-v4"
+  freeze_tag: "phase0-experiment-freeze-v5"
   rpm_limit: 15.0
   batch_size: 1
   syntax_retry_limit: 1
   reference_independence_threshold: 0.85
   reference_calibration_fixture_hash: "707762ab31720b7c"
   dedup_threshold: 0.70
-  phase_a_policy_identifier: "complexity_aware_adaptive_v1"
+  phase_a_policy_identifier: "complexity_aware_adaptive_v2_explicit_cap"
+  phase_b_policy_identifier: "multiscale_regime_validation_v1"
   targeted_subtype_allocation_policy: "stratified_strata_lowest_accepted_adaptive"
   uniform_selection_policy: "round_robin_unstratified"
   seed_policy:

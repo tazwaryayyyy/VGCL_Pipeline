@@ -168,6 +168,32 @@ class ExperimentLedger:
             }
         return result
 
+    def get_generator_model_distribution(self) -> Dict[str, Any]:
+        """Audits generator-model exposure and fallback frequency across recorded entries."""
+        entries = self.get_entries()
+        total = len(entries)
+        counts: Dict[str, int] = {}
+        primary_count = 0
+        fallback_count = 0
+        primary_model = "gemini-3.6-flash"
+
+        for e in entries:
+            m = e.get("generator_model", "unknown")
+            counts[m] = counts.get(m, 0) + 1
+            if m == primary_model:
+                primary_count += 1
+            else:
+                fallback_count += 1
+
+        return {
+            "total_entries": total,
+            "model_counts": counts,
+            "primary_model": primary_model,
+            "primary_count": primary_count,
+            "fallback_count": fallback_count,
+            "fallback_frequency": fallback_count / total if total > 0 else 0.0,
+        }
+
 
 if __name__ == "__main__":
     ledger = ExperimentLedger()
@@ -181,3 +207,4 @@ if __name__ == "__main__":
     ledger.record_entry(sample_entry)
     print("Logged entries count:", len(ledger.get_entries()))
     print("Subtype distribution:", ledger.get_subtype_distribution("FC_01_MICRO_CORRECTNESS"))
+    print("Model distribution:", ledger.get_generator_model_distribution())

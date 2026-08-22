@@ -1,4 +1,4 @@
-﻿# VGCL Phase 0: Reproducibility Protocol & External Audit Specification
+# VGCL Phase 0: Reproducibility Protocol & External Audit Specification
 
 This repository implements a **causally identifiable verification-guided curriculum learning (VGCL) experimental framework** designed for rigorous scientific verification, audit, and replication.
 
@@ -210,4 +210,4 @@ Before curriculum generation begins, `generation_manifest.py` writes `data/gener
 1. **API Non-Determinism**: Upstream hosted LLM sampling exhibits minor non-determinism even at fixed temperature and seed parameters. Gemini output is not deterministic.
 2. **Fallback model activation**: When the primary model is quota-exhausted, a declared fallback model serves the request. The fallback model identity is recorded in the ledger, not masked. This is an operational reliability measure; different fallback models are not scientifically equivalent.
 3. **Process Resource Limits**: OS-level RLIMIT CPU/memory enforcement depends on POSIX `resource` availability and falls back gracefully under Windows environments.
-4. **Pre-Experiment Freeze**: Quality gates, ledger schema, rate controls, and test suites are frozen at revision `phase0-experiment-freeze-v4`.
+4. **Pre-Experiment Freeze**: Quality gates, ledger schema, rate controls, and test suites are frozen at revision `phase0-experiment-freeze-v5`.

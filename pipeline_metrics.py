@@ -41,6 +41,17 @@ class _Counters:
     phase_a_failures: int = 0
     phase_b_failures: int = 0
 
+    # API infrastructure and error classification counters (distinct from candidate quality)
+    api_rate_limit_events: int = 0
+    api_quota_events: int = 0
+    api_transient_events: int = 0
+    api_other_errors: int = 0
+    api_fallback_events: int = 0
+
+    # Generator model serving distributions
+    generator_model_counts: Dict[str, int] = field(default_factory=dict)
+    fallback_reasons: Dict[str, int] = field(default_factory=dict)
+
     # Per-subtype approved / attempted counters
     subtype_approved: Dict[str, int] = field(default_factory=dict)
     subtype_attempted: Dict[str, int] = field(default_factory=dict)
@@ -178,6 +189,39 @@ class PipelineMetrics:
         with self._lock:
             self._counters.subtype_rejections += 1
 
+    def record_api_event(self, error_class: str, reason: str = "") -> None:
+        """Records classified API infrastructure failure event without distorting candidate metrics."""
+        with self._lock:
+            if error_class == "rate_limit":
+                self._counters.api_rate_limit_events += 1
+            elif error_class == "quota_exhaustion":
+                self._counters.api_quota_events += 1
+            elif error_class == "transient_server_failure":
+                self._counters.api_transient_events += 1
+            else:
+                self._counters.api_other_errors += 1
+            if reason:
+                self._counters.fallback_reasons[reason] = (
+                    self._counters.fallback_reasons.get(reason, 0) + 1
+                )
+
+    def record_fallback_event(self, reason: str = "") -> None:
+        """Records one generator fallback transition event."""
+        with self._lock:
+            self._counters.api_fallback_events += 1
+            if reason:
+                self._counters.fallback_reasons[reason] = (
+                    self._counters.fallback_reasons.get(reason, 0) + 1
+                )
+
+    def record_model_serving(self, model: str) -> None:
+        """Records generator model serving frequency."""
+        with self._lock:
+            if model:
+                self._counters.generator_model_counts[model] = (
+                    self._counters.generator_model_counts.get(model, 0) + 1
+                )
+
     def record_approved(self, subtype: str = "", cluster: str = "") -> None:
         """Records one sample accepted into the ledger."""
         with self._lock:
@@ -248,6 +292,8 @@ class PipelineMetrics:
 
             gen_lats = list(self._gen_latencies)
             ver_lats = list(self._ver_latencies)
+            model_counts = dict(c.generator_model_counts)
+            fallback_reasons_snap = dict(c.fallback_reasons)
 
         elapsed = time.perf_counter() - self._start_time
 
@@ -276,6 +322,14 @@ class PipelineMetrics:
             "subtype_rejections": c.subtype_rejections,
             "phase_a_failures": c.phase_a_failures,
             "phase_b_failures": c.phase_b_failures,
+            # Infrastructure and generator model exposure
+            "api_rate_limit_events": c.api_rate_limit_events,
+            "api_quota_events": c.api_quota_events,
+            "api_transient_events": c.api_transient_events,
+            "api_other_errors": c.api_other_errors,
+            "api_fallback_events": c.api_fallback_events,
+            "generator_model_counts": model_counts,
+            "fallback_reasons": fallback_reasons_snap,
             # Rates
             "approval_rate": round(approval_rate, 6),
             "syntax_pass_rate": round(syntax_pass_rate, 6),

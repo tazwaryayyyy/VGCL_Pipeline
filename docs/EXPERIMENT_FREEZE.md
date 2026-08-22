@@ -1,4 +1,4 @@
-﻿# VGCL Phase 0 Experiment Freeze
+# VGCL Phase 0 Experiment Freeze
 
 Freeze version:
 phase0-experiment-freeze-v2
@@ -210,6 +210,58 @@ New in this revision:
 Test Status:
 37 integration tests passing (0 failures, 0 errors).
 py_compile: passed for all 12 modules including generation_manifest.py.
+git diff --check: passed.
+Calibration fixture: 11/11 assertions passed.
+
+Repository status:
+Frozen for Phase 0 curriculum generation.
+
+---
+
+# Freeze Revision: phase0-experiment-freeze-v5
+
+Freeze version:
+phase0-experiment-freeze-v5
+
+Previous freeze:
+phase0-experiment-freeze-v4
+
+Reason for revision:
+Final pre-generation scientific hardening based on Gemini pilot observations:
+1. Phase A Admissibility & Scale Cap Propagation (V5-A): Propagate explicit derived scale cap ($C$) to test generators, filter candidate test cases with exact boundary enforcement, and record structured scale diagnostics.
+2. Phase B Constraint-Regime Multi-Scale Validation (V5-B): Extract problem constraint bounds ($N$, time limit, memory limit) and perform multi-scale test execution with AST structural scaling checks (rejecting $O(N^2)$ loops or unmemoized recursion on $N \ge 5000$, while permitting small quadratic domains $N \le 500$).
+3. Generator Model Policy & Fallback Observability (V5-C): Classify API errors (`rate_limit`, `quota_exhaustion`, `transient_server_failure`, `request_rejection`, `unknown`) to isolate infrastructure failures from candidate quality denominators; log explicit fallback reasons; audit generator model serving distribution in `ExperimentLedger` and `PipelineMetrics`.
+4. Empirical Difficulty Mathematical Audit (V5-D): Verified $1.0 - \text{base\_pass10}$ formula with explicit deterministic unit tests and edge-case boundary tests.
+
+Commit:
+(see git log — commit "Harden Phase 0 verification and generation control")
+
+Date:
+2026-08-23
+
+Base model:
+Qwen-2.5-1.5B-Instruct
+
+Generator model policy:
+Primary: gemini-3.6-flash
+Fallback sequence: [gemini-3.1-flash-lite, gemini-3.5-flash-lite, gemini-flash-latest]
+Policy declaration: EXPERIMENTAL_GENERATOR_POLICY in targeted_generation.py (imported identically by uniform_generation.py)
+Observability: fallback reasons and classified error categories logged and recorded in metrics; serving model recorded in every ledger entry and quarantine artifact.
+
+Quality Gates & Verification:
+1. Pre-oracle syntax validation with 1-shot component-level LLM regeneration retry.
+2. Optimized/reference structural independence gate (0.85 normalized AST n-gram similarity threshold, AST/CFG shape isomorphism check).
+3. Subtype validity gate (deterministic AST evidence for Types A–F; NOT_VALIDATABLE for uniform/unstratified identifiers).
+4. Two-phase differential verification oracle with explicit Phase A cap propagation ($C \le 5$ for recursive/combinatorial brute; $C \le 8$ default) and Phase B multi-scale constraint-regime validation.
+5. Structural corpus deduplication (AST/CFG similarity < 0.70).
+6. Permanent quarantine protocol with enriched rejection diagnostics.
+
+Accounting & Metrics:
+Separate accounting for API infrastructure events (`api_rate_limit_events`, `api_quota_events`, `api_transient_events`, `api_other_errors`, `api_fallback_events`), model serving counts, initial generation calls, syntax retry calls, reference independence rejections, subtype rejections, Phase A/B passes and failures, deduplication rejections, and approvals.
+
+Test Status:
+52 integration tests passing (0 failures, 0 errors).
+py_compile: passed for all modules.
 git diff --check: passed.
 Calibration fixture: 11/11 assertions passed.
 

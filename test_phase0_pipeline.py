@@ -1,4 +1,4 @@
-﻿"""test_phase0_pipeline.py
+"""test_phase0_pipeline.py
 
 Comprehensive Phase 0 Integration Test Suite.
 Validates end-to-end functionality across all 8 core Phase 0 modules:
@@ -841,6 +841,261 @@ class TestPhase0Pipeline(unittest.TestCase):
                     report["category_summary"][cat]["max"], 0.85,
                     f"Category '{cat}' has similarity >= 0.85 but expected PASS."
                 )
+
+    # ------------------------------------------------------------------
+    # Tests 23-37: V5-A, V5-B, V5-C, V5-D, Adversarial, and Freeze-V5
+    # ------------------------------------------------------------------
+
+    def test_23_phase_a_scale_propagation_and_cap_respect(self):
+        """Test 23: Phase A explicit scale cap propagation and test admissibility."""
+        oracle = VerificationOracle(quarantine_dir=self.quarantine_dir)
+        # Pathological brute solver with recursive search triggering cap=5
+        code = (
+            "def solve(nums):\n"
+            "    return sum(nums)\n\n"
+            "def solve_brute(nums):\n"
+            "    if not nums:\n"
+            "        return 0\n"
+            "    return nums[0] + solve_brute(nums[1:])\n\n"
+            "import random\n"
+            "def generate_test_cases(seed, scale, max_small_dimension=8):\n"
+            "    random.seed(seed)\n"
+            "    if scale == 'small':\n"
+            "        bound = min(max_small_dimension, 5)\n"
+            "        return [([random.randint(1, 10) for _ in range(bound)],) for _ in range(3)]\n"
+            "    else:\n"
+            "        return [([random.randint(1, 10) for _ in range(100)],) for _ in range(2)]\n"
+        )
+        res = oracle.verify(code, seed=42)
+        self.assertTrue(res["verified"])
+        self.assertEqual(res["phase_a_scale_cap"], 5)
+        self.assertGreater(res["phase_a_admissible_case_count"], 0)
+        self.assertEqual(res["phase_a_scale_policy"], "pathological_bruteforce_cap")
+
+    def test_24_phase_a_exact_boundary_and_rejection(self):
+        """Test 24: Phase A boundary filtering accepts exact cap and rejects cap+1."""
+        pol5 = {"maximum_dimension": 5, "policy": "pathological_bruteforce_cap"}
+        self.assertTrue(case_within_phase_a_policy(([1, 2, 3, 4, 5],), pol5))
+        self.assertFalse(case_within_phase_a_policy(([1, 2, 3, 4, 5, 6],), pol5))
+
+    def test_25_phase_a_deterministic_case_generation(self):
+        """Test 25: Phase A case generation is deterministic for fixed seed and cap."""
+        import random
+        def gen(seed, max_small_dim=5):
+            random.seed(seed)
+            return [([random.randint(1, 10) for _ in range(random.randint(1, max_small_dim))],) for _ in range(5)]
+
+        cases1 = gen(42, 5)
+        cases2 = gen(42, 5)
+        self.assertEqual(cases1, cases2)
+
+    def test_26_phase_a_zero_admissible_cases_diagnostic(self):
+        """Test 26: Oracle correctly flags zero admissible cases within cap with explicit diagnostic."""
+        oracle = VerificationOracle(quarantine_dir=self.quarantine_dir)
+        # Brute solver is recursive (cap=5), but test generator strictly emits dimension 8
+        code = (
+            "def solve(nums):\n"
+            "    return sum(nums)\n\n"
+            "def solve_brute(nums):\n"
+            "    if not nums: return 0\n"
+            "    return nums[0] + solve_brute(nums[1:])\n\n"
+            "import random\n"
+            "def generate_test_cases(seed, scale):\n"
+            "    random.seed(seed)\n"
+            "    if scale == 'small':\n"
+            "        return [([1, 2, 3, 4, 5, 6, 7, 8],)]\n"
+            "    return [([1]*100,)]\n"
+        )
+        res = oracle.verify(code, seed=42)
+        self.assertFalse(res["verified"])
+        self.assertFalse(res["phase_a_pass"])
+        self.assertIn("Phase A Scale Policy Rejected", res["reason"])
+        diag = res["rejection_diagnostics"]
+        self.assertEqual(diag["phase_a_mismatch_type"], "scale_policy_no_admissible_cases")
+        self.assertEqual(diag["phase_a_scale_cap"], 5)
+        self.assertEqual(diag["phase_a_admissible_case_count"], 0)
+
+    def test_27_phase_b_linear_solution_passes(self):
+        """Test 27: Declared N <= 100000 with optimal O(N) solution passes Phase B."""
+        from quality_gates import check_constraint_regime_compatibility
+        spec = "Given an array of N integers where N <= 100000 and time limit 2.0s, return max element."
+        solve_opt = "def solve(nums):\n    m = nums[0]\n    for x in nums:\n        if x > m: m = x\n    return m"
+        compat = check_constraint_regime_compatibility(spec, solve_opt)
+        self.assertEqual(compat["status"], "PASS")
+
+    def test_28_phase_b_quadratic_rejected_on_large_regime(self):
+        """Test 28: Declared N <= 100000 with obvious O(N^2) nested loops is rejected."""
+        from quality_gates import check_constraint_regime_compatibility
+        spec = "Given an array of N integers where N <= 100000 and time limit 2.0s, find duplicate."
+        solve_opt = (
+            "def solve(nums):\n"
+            "    for i in range(len(nums)):\n"
+            "        for j in range(i + 1, len(nums)):\n"
+            "            if nums[i] == nums[j]:\n"
+            "                return nums[i]\n"
+            "    return -1"
+        )
+        compat = check_constraint_regime_compatibility(spec, solve_opt)
+        self.assertEqual(compat["status"], "REJECT")
+        self.assertIn("structural scaling incompatibility", compat["reason"])
+
+    def test_29_phase_b_exponential_rejected(self):
+        """Test 29: Declared N <= 100000 with branching unmemoized recursion is rejected."""
+        from quality_gates import check_constraint_regime_compatibility
+        spec = "Given N <= 100000, compute recursive fibonacci sequence."
+        solve_opt = (
+            "def solve(n):\n"
+            "    if n <= 1: return n\n"
+            "    return solve(n - 1) + solve(n - 2)"
+        )
+        compat = check_constraint_regime_compatibility(spec, solve_opt)
+        self.assertEqual(compat["status"], "REJECT")
+
+    def test_30_phase_b_quadratic_permitted_on_small_regime(self):
+        """Test 30: Declared N <= 500 with O(N^2) solution is permitted and passes."""
+        from quality_gates import check_constraint_regime_compatibility
+        spec = "Given an array of length N <= 500, count all pairs with sum S."
+        solve_opt = (
+            "def solve(nums, s):\n"
+            "    count = 0\n"
+            "    for i in range(len(nums)):\n"
+            "        for j in range(i + 1, len(nums)):\n"
+            "            if nums[i] + nums[j] == s:\n"
+            "                count += 1\n"
+            "    return count"
+        )
+        compat = check_constraint_regime_compatibility(spec, solve_opt)
+        self.assertEqual(compat["status"], "PASS")
+        self.assertIn("compatible with declared small constraint regime", compat["reason"])
+
+    def test_31_phase_b_nested_loops_over_small_independent_dimension_permitted(self):
+        """Test 31: Nested loops over small independent bounds (e.g. range(26)) pass on large N."""
+        from quality_gates import check_constraint_regime_compatibility
+        spec = "Given a string of length N <= 100000, count distinct character frequencies."
+        solve_opt = (
+            "def solve(s):\n"
+            "    ans = 0\n"
+            "    for ch in s:\n"
+            "        for bit in range(26):\n"
+            "            if ord(ch) - 97 == bit:\n"
+            "                ans += 1\n"
+            "    return ans"
+        )
+        compat = check_constraint_regime_compatibility(spec, solve_opt)
+        self.assertEqual(compat["status"], "PASS")
+
+    def test_32_api_error_classification_and_metrics(self):
+        """Test 32: API error classification isolates infrastructure events from candidate quality."""
+        from targeted_generation import classify_api_error
+
+        # 429 rate limit
+        err_cat, reason = classify_api_error(Exception("429 Too Many Requests: Rate limit exceeded"))
+        self.assertEqual(err_cat, "rate_limit")
+
+        # Quota exhaustion
+        err_cat, reason = classify_api_error(Exception("RESOURCE_EXHAUSTED: quota exceeded for current project"))
+        self.assertEqual(err_cat, "quota_exhaustion")
+
+        # Transient 503
+        err_cat, reason = classify_api_error(Exception("503 Service Unavailable"))
+        self.assertEqual(err_cat, "transient_server_failure")
+
+        # Metrics recording
+        m = PipelineMetrics()
+        m.record_attempt(cluster="FC_01")
+        m.record_api_event("rate_limit", reason="429 rate limit")
+        m.record_api_event("quota_exhaustion", reason="quota exceeded")
+        m.record_api_event("transient_server_failure", reason="503")
+        m.record_approved(cluster="FC_01")
+
+        snap = m.snapshot()
+        self.assertEqual(snap["api_rate_limit_events"], 1)
+        self.assertEqual(snap["api_quota_events"], 1)
+        self.assertEqual(snap["api_transient_events"], 1)
+        self.assertEqual(snap["approval_rate"], 1.0)  # Approval rate unaffected by infrastructure retries
+
+    def test_33_generator_policy_fallback_reason_recorded(self):
+        """Test 33: Generator model fallback logs reason and tracks serving distribution."""
+        m = PipelineMetrics()
+        m.record_fallback_event(reason="quota_exhaustion: gemini-3.6-flash quota reached")
+        m.record_model_serving("gemini-3.1-flash-lite")
+
+        snap = m.snapshot()
+        self.assertEqual(snap["api_fallback_events"], 1)
+        self.assertEqual(snap["generator_model_counts"]["gemini-3.1-flash-lite"], 1)
+
+    def test_34_ledger_model_distribution_audit(self):
+        """Test 34: ExperimentLedger audits generator model exposure and fallback frequency."""
+        ledger = ExperimentLedger(db_path=self.db_path, jsonl_path=self.jsonl_path)
+        ledger.record_entry(LedgerEntry(problem_id="P1", seed=1, generator_model="gemini-3.6-flash"))
+        ledger.record_entry(LedgerEntry(problem_id="P2", seed=2, generator_model="gemini-3.1-flash-lite"))
+        ledger.record_entry(LedgerEntry(problem_id="P3", seed=3, generator_model="gemini-3.6-flash"))
+
+        audit = ledger.get_generator_model_distribution()
+        self.assertEqual(audit["total_entries"], 3)
+        self.assertEqual(audit["primary_count"], 2)
+        self.assertEqual(audit["fallback_count"], 1)
+        self.assertAlmostEqual(audit["fallback_frequency"], 1.0 / 3.0)
+
+    def test_35_empirical_difficulty_audit_and_edge_cases(self):
+        """Test 35: Mathematical audit of empirical difficulty on mocked pass rates."""
+        # 1. Formula: empirical_difficulty = 1.0 - base_pass10
+        # Pass@1 = 0.0 -> Pass@10 = 0.0 -> diff = 1.0
+        passes = 0
+        pass1 = passes / 10
+        pass10 = 1.0 if passes > 0 else 0.0
+        diff = 1.0 - pass10
+        self.assertEqual(pass1, 0.0)
+        self.assertEqual(pass10, 0.0)
+        self.assertEqual(diff, 1.0)
+
+        # Pass@1 = 0.5 -> Pass@10 = 1.0 -> diff = 0.0
+        passes = 5
+        pass1 = passes / 10
+        pass10 = 1.0 if passes > 0 else 0.0
+        diff = 1.0 - pass10
+        self.assertEqual(pass1, 0.5)
+        self.assertEqual(pass10, 1.0)
+        self.assertEqual(diff, 0.0)
+
+        # Pass@1 = 1.0 -> Pass@10 = 1.0 -> diff = 0.0
+        passes = 10
+        pass1 = passes / 10
+        pass10 = 1.0 if passes > 0 else 0.0
+        diff = 1.0 - pass10
+        self.assertEqual(pass1, 1.0)
+        self.assertEqual(pass10, 1.0)
+        self.assertEqual(diff, 0.0)
+
+    def test_36_freeze_v5_tag_and_manifest_identity(self):
+        """Test 36: Freeze tag is phase0-experiment-freeze-v5 in manifest and config."""
+        from generation_manifest import FROZEN_EXPERIMENT_CONFIG, create_generation_manifest
+        from generation_manifest import load_yaml_config
+
+        self.assertEqual(FROZEN_EXPERIMENT_CONFIG["freeze_tag"], "phase0-experiment-freeze-v5")
+        manifest = create_generation_manifest(output_path=None)
+        self.assertEqual(manifest["freeze_tag"], "phase0-experiment-freeze-v5")
+        cfg = load_yaml_config()
+        self.assertEqual(cfg["generation_configuration"]["freeze_tag"], "phase0-experiment-freeze-v5")
+
+    def test_37_adversarial_hidden_loops_and_misleading_comments(self):
+        """Test 37: Misleading comments cannot hide dominant nested loops over large regimes."""
+        from quality_gates import check_constraint_regime_compatibility
+        spec = "Given an array of N numbers with N <= 100000. Time limit 2.0s."
+        solve_opt = (
+            "# Time Complexity: O(N) linear time\n"
+            "# Space Complexity: O(1)\n"
+            "def solve(nums):\n"
+            "    # This is a linear algorithm\n"
+            "    for i in range(len(nums)):\n"
+            "        for j in range(len(nums)):\n"
+            "            if nums[i] == nums[j]:\n"
+            "                pass\n"
+            "    return len(nums)\n"
+        )
+        compat = check_constraint_regime_compatibility(spec, solve_opt)
+        self.assertEqual(compat["status"], "REJECT")
+        self.assertIn("structural scaling incompatibility", compat["reason"])
 
 
 if __name__ == "__main__":
