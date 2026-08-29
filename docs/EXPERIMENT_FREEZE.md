@@ -267,3 +267,51 @@ Calibration fixture: 11/11 assertions passed.
 
 Repository status:
 Frozen for Phase 0 curriculum generation.
+
+---
+
+# Freeze Revision: phase0-experiment-freeze-v6
+
+Freeze version:
+phase0-experiment-freeze-v6
+
+Previous freeze:
+phase0-experiment-freeze-v5
+
+Reason for revision:
+Final scientific repair of Phase 0 causal chain, base-model failure attribution, and generator policy enforcement:
+1. Real Base-Model Probing Engine (`base_model_prober.py`): Replaced PRNG simulation (`calibrate_empirical_difficulty`) with deterministic execution probing of the frozen base model $\theta_{\text{base}}$ (`Qwen/Qwen2.5-1.5B-Instruct`), measuring greedy Pass@1 and sampled Pass@10 ($k=10$, $T=0.8$) under immutable probing policy hash.
+2. Direct Failure Classification & Evidence Extraction: Probe execution failures are deterministically classified using `failure_mapper.classify_failure`, recording observable execution evidence (`exception_type`, `error_msg`, execution time, memory usage) into structured failure records.
+3. Causal Target Attribution Ledger Schema (`experiment_ledger.py`): Ledger schema extended with `target_validation_status` (`VALIDATED` | `UNVERIFIED` | `NOT_APPLICABLE`), `target_evidence` (JSON trace), `probe_result_hash`, `generator_policy`, `fallback_used`, and `fallback_reason`. Invariant: `target_failure_cluster` records the requested target; `target_validation_status="VALIDATED"` certifies empirical failure evidence was observed on $\theta_{\text{base}}$.
+4. Semantic Drift Prevention Policy (`targeted_generation.py`): Enforced canonical `CLUSTER_SUBTYPE_COMPATIBILITY` mapping inside `SubtypeScheduler.select()`. The eligible subtype stratum is strictly intersected with allowed subtypes for the requested failure cluster; unknown clusters or empty intersections fail closed with `ValueError`.
+5. Generator Fallback Accounting & Anti-Contamination: `_call_llm_paced` tracks whether a fallback model was invoked. Fallback activations are recorded per candidate in `fallback_used` and `fallback_reason` in the ledger, preventing silent model promotion or unacknowledged generator contamination.
+
+Date:
+2026-08-30
+
+Base model:
+Qwen/Qwen2.5-1.5B-Instruct
+
+Generator model policy:
+Primary: gemini-3.6-flash
+Fallback sequence: [gemini-3.1-flash-lite, gemini-3.5-flash-lite, gemini-flash-latest]
+Policy declaration: EXPERIMENTAL_GENERATOR_POLICY
+
+Quality Gates & Verification:
+1. Pre-oracle syntax validation with 1-shot component-level LLM regeneration retry.
+2. Optimized/reference structural independence gate (0.85 normalized AST n-gram similarity threshold, AST/CFG shape isomorphism check).
+3. Subtype validity gate (deterministic AST evidence for Types A–F; NOT_VALIDATABLE for uniform/unstratified identifiers).
+4. Subtype/cluster compatibility enforcement (fail-closed against semantic drift).
+5. Two-phase differential verification oracle with explicit Phase A cap propagation ($C \le 5$ for recursive/combinatorial brute; $C \le 8$ default) and Phase B multi-scale constraint-regime validation.
+6. Real base-model Pass@1/Pass@10 execution probing and failure attribution.
+7. Structural corpus deduplication (AST/CFG similarity < 0.70).
+8. Permanent quarantine protocol with enriched rejection diagnostics.
+
+Test Status:
+56 integration tests passing (0 failures, 0 errors).
+py_compile: passed for all modules including `base_model_prober.py`.
+git diff --check: passed.
+
+Repository status:
+Frozen for Phase 0 curriculum generation and statistical evaluation under V6.
+

@@ -36,10 +36,12 @@ from targeted_generation import (
     EXPERIMENTAL_GENERATOR_POLICY,
     _MODEL_PRIORITY,
     _call_llm_paced,
-    calibrate_empirical_difficulty,
+    _get_prober,
     client_side_pace,
     parse_block_content,
 )
+from base_model_prober import BaseModelProber
+
 
 load_dotenv()
 
@@ -59,11 +61,14 @@ def generate_uniform_candidate(
     cluster_id: str,
     seed: int,
     metrics: Optional[PipelineMetrics] = None,
-) -> Tuple[bool, Dict[str, str], str, float, int]:
+) -> Tuple[bool, Dict[str, str], str, float, int, bool, str]:
     """
     Decoupled 2-Pass Generation Pipeline (Control Condition - Invariant V).
     Pass 1: Generate PROBLEM_SPEC, SOLVE_OPTIMIZED, and TEST_GENERATOR uniformly without failure targeting.
     Pass 2: Isolated call receiving ONLY PROBLEM_SPEC to write naive/brute-force SOLVE_BRUTE.
+
+    Returns:
+        (ok, blocks, model_name, latency, api_calls, fallback_used, fallback_reason)
     """
     system_pass1 = (
         "You are a principal competitive programming problem architect. Design a self-contained, "
@@ -85,14 +90,14 @@ def generate_uniform_candidate(
     )
     user_pass1 = f"Generate a general algorithmic problem package (Seed {seed})."
 
-    raw_p1, model1, lat1, ret1 = _call_llm_paced(system_pass1, user_pass1, metrics=metrics)
+    raw_p1, model1, lat1, ret1, fb1, fb_reason1 = _call_llm_paced(system_pass1, user_pass1, metrics=metrics)
 
     spec = parse_block_content(raw_p1, "### PROBLEM_SPEC")
     solve_opt = parse_block_content(raw_p1, "### SOLVE_OPTIMIZED")
     test_gen = parse_block_content(raw_p1, "### TEST_GENERATOR")
 
     if not spec or not solve_opt or not test_gen:
-        return False, {}, model1, lat1, ret1
+        return False, {}, model1, lat1, ret1, fb1, fb_reason1
 
     # Pass 2: Isolated Reference Implementation (Oracle Independence - Invariant III)
     system_pass2 = (
@@ -110,11 +115,11 @@ def generate_uniform_candidate(
     )
     user_pass2 = f"Here is the problem specification:\n\n{spec}\n\nWrite 'solve_brute' for this spec."
 
-    raw_p2, model2, lat2, ret2 = _call_llm_paced(system_pass2, user_pass2, metrics=metrics)
+    raw_p2, model2, lat2, ret2, fb2, fb_reason2 = _call_llm_paced(system_pass2, user_pass2, metrics=metrics)
     solve_brute = parse_block_content(raw_p2, "### SOLVE_BRUTE")
 
     if not solve_brute:
-        return False, {}, model2, lat1 + lat2, ret1 + ret2
+        return False, {}, model2, lat1 + lat2, ret1 + ret2, fb1 or fb2, fb_reason2 or fb_reason1
 
     blocks = {
         "spec": spec,
@@ -122,7 +127,10 @@ def generate_uniform_candidate(
         "solve_brute": solve_brute,
         "test_gen": test_gen,
     }
-    return True, blocks, model1, lat1 + lat2, ret1 + ret2
+    fallback_used = fb1 or fb2
+    fallback_reason = fb_reason2 if fb2 else (fb_reason1 if fb1 else "")
+    return True, blocks, model1, lat1 + lat2, ret1 + ret2, fallback_used, fallback_reason
+
 
 
 def run_uniform_generation_pipeline(
@@ -172,14 +180,14 @@ def run_uniform_generation_pipeline(
         def _generate_one_uniform(
             cluster_id: str,
             b_seed: int,
-        ) -> Tuple[int, str, bool, Dict[str, str], str, float, int]:
+        ) -> Tuple[int, str, bool, Dict[str, str], str, float, int, bool, str]:
             """Worker thunk executed in the thread pool."""
-            ok, blocks, model_name, latency, retries = generate_uniform_candidate(
+            ok, blocks, model_name, latency, retries, fallback_used, fallback_reason = generate_uniform_candidate(
                 cluster_id=cluster_id,
                 seed=b_seed,
                 metrics=metrics,
             )
-            return b_seed, cluster_id, ok, blocks, model_name, latency, retries
+            return b_seed, cluster_id, ok, blocks, model_name, latency, retries, fallback_used, fallback_reason
 
         effective_batch = min(batch_size, num_samples - accepted)
         futures_map = {}
@@ -198,7 +206,7 @@ def run_uniform_generation_pipeline(
                 try:
                     result = fut.result()
                 except Exception as exc:
-                    result = (b_seed, cluster_id, False, {}, "failed", 0.0, 0)
+                    result = (b_seed, cluster_id, False, {}, "failed", 0.0, 0, False, "")
                     print(f"  [X] Batch worker exception (seed {b_seed}): {exc}")
                 results_by_seed[b_seed] = result
 
@@ -207,12 +215,13 @@ def run_uniform_generation_pipeline(
             if accepted >= num_samples:
                 break
 
-            b_seed_val, cluster_id, ok, blocks, model_name, latency, api_calls = results_by_seed[b_seed]
+            b_seed_val, cluster_id, ok, blocks, model_name, latency, api_calls, gen_fallback_used, gen_fallback_reason = results_by_seed[b_seed]
 
             metrics.record_attempt(cluster=cluster_id)
             metrics.record_gen_latency(latency)
             metrics.record_initial_generation_api_calls(api_calls)
             metrics.record_model_serving(model_name)
+
 
             print(
                 f"\n[+] Generating Uniform Sample [{accepted + 1}/{num_samples}] "
@@ -358,10 +367,25 @@ def run_uniform_generation_pipeline(
                 metrics.record_dedup_rejection()
                 continue
 
-            # 3. Empirical Difficulty Calibration
-            pass1, pass10, diff = calibrate_empirical_difficulty(full_code, b_seed_val)
+            # 5. Real Base-Model Probing (V6 — replaces PRNG calibration)
+            prober = _get_prober()
+            probe_result = prober.probe(
+                problem_id=problem_id,
+                problem_spec=blocks["spec"],
+                solve_brute=blocks["solve_brute"],
+                test_gen=blocks["test_gen"],
+                seed=b_seed_val,
+            )
+            pass1 = probe_result.pass1
+            pass10 = probe_result.pass10
+            diff = probe_result.empirical_difficulty
 
-            # 4. Record in Ledger
+            probe_dict_json = json.dumps(probe_result.to_dict(), sort_keys=True)
+            probe_hash = hashlib.sha256(probe_dict_json.encode()).hexdigest()[:16]
+
+            target_evidence_json = json.dumps(probe_result.failure_evidence)
+
+            # 6. Record in Ledger
             entry = LedgerEntry(
                 problem_id=problem_id,
                 seed=b_seed_val,
@@ -370,6 +394,14 @@ def run_uniform_generation_pipeline(
                 prompt_hash=prompt_hash,
                 target_failure_cluster="UNIFORM_CONTROL",
                 monotonic_queue_subtype=cluster_id,
+                # V6 targeting and policy fields
+                target_validation_status="NOT_APPLICABLE",
+                target_evidence=target_evidence_json,
+                probe_result_hash=probe_hash,
+                generator_policy="EXPERIMENTAL_GENERATOR_POLICY",
+                fallback_used=gen_fallback_used,
+                fallback_reason=gen_fallback_reason,
+                # Difficulty from real probe
                 base_pass1=pass1,
                 base_pass10=pass10,
                 empirical_difficulty=diff,
@@ -380,7 +412,7 @@ def run_uniform_generation_pipeline(
                 ast_hash=dedup_res.ast_hash,
                 cfg_hash=dedup_res.cfg_hash,
                 similarity_score=dedup_res.similarity_score,
-                acceptance_reason="Approved uniform control candidate",
+                acceptance_reason="Approved uniform control candidate [target_validation=NOT_APPLICABLE]",
                 code_content=full_code,
                 spec=blocks["spec"],
             )
@@ -391,6 +423,7 @@ def run_uniform_generation_pipeline(
                 f"  [✓] ACCEPTED & RECORDED (CONTROL): {problem_id} "
                 f"(Diff: {diff:.2f}, AST: {dedup_res.ast_hash})"
             )
+
 
     # Flush metrics on completion
     metrics.flush(

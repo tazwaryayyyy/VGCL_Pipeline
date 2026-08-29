@@ -206,8 +206,38 @@ Before curriculum generation begins, `generation_manifest.py` writes `data/gener
 | Which reference-independence threshold? | `reference_independence_threshold` |
 | Which seed policy? | `random_seed_policy` |
 
+### V6 Scientific Repairs & Target Attribution Specification
+
+The Phase 0 V6 freeze addresses the causal attribution chain from base model observations to curriculum problems:
+
+1. **Real Base-Model Probing Engine (`base_model_prober.py`)**:
+   - Replaces PRNG simulation with direct execution of $\theta_{\text{base}}$ (`Qwen/Qwen2.5-1.5B-Instruct`).
+   - Measures greedy Pass@1 ($T=0.0$) and sampled Pass@10 ($k=10$, $T=0.8$, top-p=0.95).
+   - Computes `empirical_difficulty = 1.0 - pass10`.
+   - Records tokenizer vocab size, model ID, and probing policy hash (`_PROBING_POLICY_HASH`).
+
+2. **Deterministic Failure Evidence & Classification**:
+   - Failing executions are classified by `failure_mapper.classify_failure()`.
+   - Observed execution evidence (`exception_type`, `error_msg`, execution time, memory usage) is recorded in `target_evidence`.
+
+3. **Causal Attribution Invariant & Ledger Schema**:
+   - `target_failure_cluster`: Records the requested cluster ID.
+   - `target_validation_status`:
+     - `VALIDATED`: Empirical execution failure matching the target cluster was observed on $\theta_{\text{base}}$.
+     - `UNVERIFIED`: Problem accepted without observed base model failure in the target cluster.
+     - `NOT_APPLICABLE`: Uniform control condition (no failure targeting).
+   - `probe_result_hash`: SHA-256 fingerprint cross-referencing probing sessions.
+
+4. **Semantic Drift Prevention**:
+   - Canonical `CLUSTER_SUBTYPE_COMPATIBILITY` mapping restricts subtype selection strictly to verified compatible subtypes for each cluster.
+   - Incompatible targets or unrecognized clusters fail closed (`ValueError`).
+
+5. **Generator Fallback Accounting**:
+   - `fallback_used` and `fallback_reason` explicitly track whether fallback models served generation requests, preventing unobserved dataset contamination.
+
 ### Remaining Reproducibility Limitations
 1. **API Non-Determinism**: Upstream hosted LLM sampling exhibits minor non-determinism even at fixed temperature and seed parameters. Gemini output is not deterministic.
 2. **Fallback model activation**: When the primary model is quota-exhausted, a declared fallback model serves the request. The fallback model identity is recorded in the ledger, not masked. This is an operational reliability measure; different fallback models are not scientifically equivalent.
 3. **Process Resource Limits**: OS-level RLIMIT CPU/memory enforcement depends on POSIX `resource` availability and falls back gracefully under Windows environments.
-4. **Pre-Experiment Freeze**: Quality gates, ledger schema, rate controls, and test suites are frozen at revision `phase0-experiment-freeze-v5`.
+4. **Pre-Experiment Freeze**: Quality gates, ledger schema, rate controls, and test suites are frozen at revision `phase0-experiment-freeze-v6`.
+

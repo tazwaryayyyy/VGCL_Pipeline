@@ -4,6 +4,18 @@ Structured Experiment Ledger for VGCL Phase 0.
 
 Provides persistent, audit-ready scientific recordkeeping with SQLite and JSONL backends.
 Ensures metadata immutability and complete experimental traceability.
+
+V6 additions:
+  - target_validation_status: VALIDATED | UNVERIFIED | NOT_APPLICABLE
+  - target_evidence: JSON blob of observable execution evidence that motivated the target
+  - probe_result_hash: SHA-256[:16] of the ProbingResult dict for cross-referencing
+  - generator_policy: name of the generator policy constant used
+  - fallback_used: True if a fallback model was used instead of the primary
+  - fallback_reason: reason string if fallback was activated
+
+  Invariant: target_failure_cluster records the REQUESTED target (CLI argument).
+  A label of VALIDATED in target_validation_status means real base-model failure
+  evidence exists in target_evidence; UNVERIFIED means no such evidence was produced.
 """
 
 import json
@@ -25,10 +37,25 @@ class LedgerEntry:
     generator_model: str = "gemini-3.6-flash"
     generator_version: str = "v1.0"
     prompt_hash: str = "hash0000"
-    target_failure_cluster: str = "FC_01_MICRO_CORRECTNESS"
+    target_failure_cluster: str = "FC_01_MICRO_CORRECTNESS"   # requested target (CLI argument)
     monotonic_queue_subtype: str = "Type A: sliding-window extrema"
 
-    # Difficulty
+    # V6: Target attribution
+    # target_failure_cluster records the REQUESTED target (unchanged for backward compat).
+    # target_validation_status distinguishes whether the target is backed by real evidence:
+    #   VALIDATED    — real base-model failure evidence exists in target_evidence
+    #   UNVERIFIED   — no empirical evidence; label comes from CLI argument only
+    #   NOT_APPLICABLE — uniform control condition (no targeting)
+    target_validation_status: str = "UNVERIFIED"
+    target_evidence: str = "{}"     # JSON string of ProbingResult.failure_evidence
+    probe_result_hash: str = ""     # SHA-256[:16] of ProbingResult.to_dict() for cross-ref
+
+    # V6: Generator policy traceability
+    generator_policy: str = "EXPERIMENTAL_GENERATOR_POLICY"
+    fallback_used: bool = False
+    fallback_reason: str = ""
+
+    # Difficulty  (real values from BaseModelProber in V6; mark historical V5 values as mocked)
     base_pass1: float = 0.0
     base_pass10: float = 0.0
     empirical_difficulty: float = 1.0  # 1.0 - base_pass10
@@ -97,7 +124,21 @@ class ExperimentLedger:
                     spec TEXT
                 )
             """)
+            # V6 migration: add new columns if they do not exist (idempotent)
+            v6_columns = [
+                ("target_validation_status", "TEXT DEFAULT 'UNVERIFIED'"),
+                ("target_evidence", "TEXT DEFAULT '{}'"),
+                ("probe_result_hash", "TEXT DEFAULT ''"),
+                ("generator_policy", "TEXT DEFAULT 'EXPERIMENTAL_GENERATOR_POLICY'"),
+                ("fallback_used", "INTEGER DEFAULT 0"),
+                ("fallback_reason", "TEXT DEFAULT ''"),
+            ]
+            existing = {row[1] for row in cursor.execute("PRAGMA table_info(ledger)").fetchall()}
+            for col_name, col_def in v6_columns:
+                if col_name not in existing:
+                    cursor.execute(f"ALTER TABLE ledger ADD COLUMN {col_name} {col_def}")
             conn.commit()
+
 
     def record_entry(self, entry: LedgerEntry) -> None:
         """Appends entry to both SQLite database and JSONL file immutably."""
@@ -109,8 +150,11 @@ class ExperimentLedger:
                     target_failure_cluster, monotonic_queue_subtype, base_pass1, base_pass10,
                     empirical_difficulty, oracle_confidence, phase_a_pass_count, phase_b_pass,
                     verification_status, ast_hash, cfg_hash, similarity_score, acceptance_reason,
-                    reviewer_override, quarantine_reference, code_content, spec
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    reviewer_override, quarantine_reference, code_content, spec,
+                    target_validation_status, target_evidence, probe_result_hash,
+                    generator_policy, fallback_used, fallback_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?, ?, ?, ?, ?)
             """, (
                 entry.problem_id, entry.seed, entry.timestamp, entry.generator_model,
                 entry.generator_version, entry.prompt_hash, entry.target_failure_cluster,
@@ -119,13 +163,20 @@ class ExperimentLedger:
                 1 if entry.phase_b_pass else 0, entry.verification_status, entry.ast_hash,
                 entry.cfg_hash, entry.similarity_score, entry.acceptance_reason,
                 1 if entry.reviewer_override else 0, entry.quarantine_reference,
-                entry.code_content, entry.spec
+                entry.code_content, entry.spec,
+                entry.target_validation_status,
+                entry.target_evidence,
+                entry.probe_result_hash,
+                entry.generator_policy,
+                1 if entry.fallback_used else 0,
+                entry.fallback_reason,
             ))
             conn.commit()
 
         # Append to JSONL
         with open(self.jsonl_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry.to_dict()) + "\n")
+
 
     def get_entries(self, target_cluster: Optional[str] = None) -> List[Dict[str, Any]]:
         with sqlite3.connect(self.db_path) as conn:
@@ -192,6 +243,29 @@ class ExperimentLedger:
             "primary_count": primary_count,
             "fallback_count": fallback_count,
             "fallback_frequency": fallback_count / total if total > 0 else 0.0,
+        }
+
+    def get_target_validation_summary(self) -> Dict[str, Any]:
+        """V6: Audits what fraction of targeted entries have VALIDATED vs UNVERIFIED targets.
+
+        This is the primary scientific audit tool for target attribution integrity.
+        """
+        entries = self.get_entries()
+        counts: Dict[str, int] = {"VALIDATED": 0, "UNVERIFIED": 0, "NOT_APPLICABLE": 0, "UNKNOWN": 0}
+        cluster_breakdown: Dict[str, Dict[str, int]] = {}
+        for e in entries:
+            status = e.get("target_validation_status", "UNKNOWN")
+            cluster = e.get("target_failure_cluster", "UNKNOWN")
+            counts[status] = counts.get(status, 0) + 1
+            if cluster not in cluster_breakdown:
+                cluster_breakdown[cluster] = {}
+            cluster_breakdown[cluster][status] = cluster_breakdown[cluster].get(status, 0) + 1
+        total = len(entries)
+        return {
+            "total_entries": total,
+            "validation_counts": counts,
+            "validated_fraction": counts["VALIDATED"] / total if total > 0 else 0.0,
+            "cluster_breakdown": cluster_breakdown,
         }
 
 

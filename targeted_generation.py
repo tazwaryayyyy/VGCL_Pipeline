@@ -4,9 +4,13 @@ Failure-Targeted Curriculum Generation Engine for VGCL Phase 0.
 
 Implements:
 1. Causal Failure Cluster Targeting (Invariant I): Prompts map to observable execution behaviors.
-2. Oracle Independence (Invariant III): Reference solution (solve_brute) is generated in an ISOLATED prompt without access to solve_opt.
-3. Monotonic Queue Anti-Collapse Protocol: Subtype stratification (Types A-F).
-4. Deterministic Rate Pacing & Empirical Difficulty Calibration.
+2. Oracle Independence (Invariant III): Reference solution (solve_brute) is generated in an ISOLATED
+   prompt without access to solve_opt.
+3. Monotonic Queue Anti-Collapse Protocol: Subtype stratification (Types A-F), with a deterministic
+   CLUSTER_SUBTYPE_COMPATIBILITY policy that prevents semantic drift (V6 fix).
+4. Real Empirical Difficulty Calibration via BaseModelProber (V6 fix — replaces PRNG simulation).
+5. Primary-only generator policy enforcement — fallback model usage is explicitly recorded in the
+   ledger as fallback_used=True and never silently promoted to primary (V6 fix).
 """
 
 import argparse
@@ -34,6 +38,7 @@ from syntax_repair import (
 )
 
 from generation_manifest import create_generation_manifest
+from base_model_prober import BaseModelProber, _PROBING_POLICY_HASH
 
 load_dotenv()
 
@@ -67,45 +72,77 @@ SUBTYPES = [
     "Type F: hybrid stack/deque structures",
 ]
 
-# Observable execution behavior descriptions for failure cluster targeting
-CLUSTER_BEHAVIOR_PROMPTS: Dict[str, str] = {
-    "FC_01_MICRO_CORRECTNESS": (
-        "TARGET FAILURE BEHAVIOR [FC_01_MICRO_CORRECTNESS]: "
-        "Design problems with tricky small-scale edge cases (N <= 8, zero/negative inputs, empty containers) "
-        "where naive off-by-one errors or improper boundary initialization cause output mismatches on small inputs."
-    ),
-    "FC_02_SCALE_DIVERGENCE": (
-        "TARGET FAILURE BEHAVIOR [FC_02_SCALE_DIVERGENCE]: "
-        "Design problems where small-scale inputs (N <= 8) pass easily with naive strategies, "
-        "but large scale inputs (N >= 100) explode in complexity or time (> 2.0s wall clock)."
-    ),
-    "FC_03_TERMINATION": (
-        "TARGET FAILURE BEHAVIOR [FC_03_TERMINATION]: "
-        "Design problems requiring strict cycle detection or termination bounds where missing base cases "
-        "or invalid loop conditions lead to non-termination or recursion depth limits."
-    ),
-    "FC_04_BOUNDS_VIOLATION": (
-        "TARGET FAILURE BEHAVIOR [FC_04_BOUNDS_VIOLATION]: "
-        "Design problems with tight array, deque, or matrix index boundaries where off-by-one pointer errors "
-        "or out-of-bounds indexing are primary failure traps."
-    ),
-    "FC_05_RESOURCE_FAILURE": (
-        "TARGET FAILURE BEHAVIOR [FC_05_RESOURCE_FAILURE]: "
-        "Design problems with large intermediate state allocations where unoptimized memory retention exceeds peak RSS bounds (512 MB)."
-    ),
-    "FC_06_FORMAT_CONTRACT": (
-        "TARGET FAILURE BEHAVIOR [FC_06_FORMAT_CONTRACT]: "
-        "Design problems with strict output type and shape contracts (e.g. list of tuples) where return type mismatches occur."
-    ),
-    "FC_07_STATE_INCONSISTENCY": (
-        "TARGET FAILURE BEHAVIOR [FC_07_STATE_INCONSISTENCY]: "
-        "Design problems where solution state purity is essential and mutable global/input structures break consecutive calls."
-    ),
-    "FC_08_UNKNOWN": (
-        "TARGET FAILURE BEHAVIOR [FC_08_UNKNOWN]: "
-        "Design multi-condition dynamic state transition problems."
-    ),
+# ---------------------------------------------------------------------------
+# V6: Cluster → Subtype Compatibility Policy
+# ---------------------------------------------------------------------------
+# This mapping is the SINGLE source of truth for which subtypes are compatible
+# with which failure clusters.  SubtypeScheduler.select() enforces this list
+# at call time; requesting a subtype outside a cluster's allowed set raises
+# ValueError (fail-closed).  Any change to this mapping is a policy change
+# and must be reflected in docs/EXPERIMENT_FREEZE.md.
+#
+# Rationale:
+#   FC_01 (micro-correctness)   → boundary/edge-case subtypes A, B, D, F
+#   FC_02 (scale divergence)    → complexity-intensive subtypes B, C, D
+#   FC_03 (termination)         → recursion/cycle subtypes C, E, F
+#   FC_04 (bounds violation)    → pointer/index subtypes A, D, E
+#   FC_05 (resource failure)    → memory-intensive subtypes C, D, E
+#   FC_06 (format contract)     → output-shape subtypes A, F
+#   FC_07 (state inconsistency) → stateful subtypes B, E, F
+#   FC_08 (unknown)             → all subtypes (catch-all)
+
+CLUSTER_SUBTYPE_COMPATIBILITY: Dict[str, List[str]] = {
+    "FC_01_MICRO_CORRECTNESS": [
+        "Type A: sliding-window extrema",
+        "Type B: bounded-transition DP",
+        "Type D: convex optimization deque",
+        "Type F: hybrid stack/deque structures",
+    ],
+    "FC_02_SCALE_DIVERGENCE": [
+        "Type B: bounded-transition DP",
+        "Type C: prefix-sum deque optimization",
+        "Type D: convex optimization deque",
+    ],
+    "FC_03_TERMINATION": [
+        "Type C: prefix-sum deque optimization",
+        "Type E: shortest-path deque variants",
+        "Type F: hybrid stack/deque structures",
+    ],
+    "FC_04_BOUNDS_VIOLATION": [
+        "Type A: sliding-window extrema",
+        "Type D: convex optimization deque",
+        "Type E: shortest-path deque variants",
+    ],
+    "FC_05_RESOURCE_FAILURE": [
+        "Type C: prefix-sum deque optimization",
+        "Type D: convex optimization deque",
+        "Type E: shortest-path deque variants",
+    ],
+    "FC_06_FORMAT_CONTRACT": [
+        "Type A: sliding-window extrema",
+        "Type F: hybrid stack/deque structures",
+    ],
+    "FC_07_STATE_INCONSISTENCY": [
+        "Type B: bounded-transition DP",
+        "Type E: shortest-path deque variants",
+        "Type F: hybrid stack/deque structures",
+    ],
+    "FC_08_UNKNOWN": list(SUBTYPES),  # catch-all allows all subtypes
 }
+
+# Validate policy completeness at import time — fail loudly if a cluster
+# references a subtype not in the global SUBTYPES list.
+_policy_errors: List[str] = []
+for _cluster, _allowed in CLUSTER_SUBTYPE_COMPATIBILITY.items():
+    for _st in _allowed:
+        if _st not in SUBTYPES:
+            _policy_errors.append(f"{_cluster}: '{_st}' not in SUBTYPES")
+if _policy_errors:
+    raise ValueError(
+        "CLUSTER_SUBTYPE_COMPATIBILITY references unknown subtypes: "
+        + "; ".join(_policy_errors)
+    )
+
 
 # Client-side pacing rate control: RPM limit defaults to 15 (4.0 seconds sleep between requests)
 RPM_LIMIT = 15.0
@@ -169,20 +206,26 @@ class SubtypeScheduler:
         """
         return [1.0 + 0.5 * self._approval_rate(st) for st in self._subtypes]
 
-    def select(self, ledger_dist: Dict[str, int], seed: int) -> str:
+    def select(self, ledger_dist: Dict[str, int], seed: int, cluster_id: Optional[str] = None) -> str:
         """
         Selects a subtype for the next generation attempt.
 
-        The eligible set is restricted to subtypes with the lowest accepted
-        count. If any eligible subtype has never been attempted, it is selected
-        in list order before weighted sampling is used.
+        The eligible set is first restricted to subtypes with the lowest accepted
+        count, then intersected with CLUSTER_SUBTYPE_COMPATIBILITY[cluster_id] to
+        enforce the semantic drift prevention policy (V6 fix).
 
-        Otherwise, weighted random selection is used.
+        If no compatible subtype exists for the requested cluster, raises
+        ValueError (fail-closed — never silently selects an incompatible subtype).
+
+        If any eligible compatible subtype has never been attempted, it is selected
+        in list order before weighted sampling is used.
 
         Args:
             ledger_dist: Subtype → count dict from the ledger (approved only).
             seed:        Current pipeline seed, used to seed the local RNG.
                          Does not touch the global ``random`` state.
+            cluster_id:  Optional failure cluster ID.  When provided, restricts
+                         selection to subtypes in CLUSTER_SUBTYPE_COMPATIBILITY.
 
         Returns:
             The selected subtype string.
@@ -191,6 +234,27 @@ class SubtypeScheduler:
         accepted_counts = {st: ledger_dist.get(st, 0) for st in self._subtypes}
         min_accepted = min(accepted_counts.values())
         eligible = [st for st in self._subtypes if accepted_counts[st] == min_accepted]
+
+        # V6: intersect with cluster compatibility policy (fail-closed)
+        if cluster_id is not None:
+            allowed = CLUSTER_SUBTYPE_COMPATIBILITY.get(cluster_id)
+            if allowed is None:
+                raise ValueError(
+                    f"SubtypeScheduler.select: cluster_id '{cluster_id}' has no entry in "
+                    "CLUSTER_SUBTYPE_COMPATIBILITY. Add it before running generation."
+                )
+            compatible_eligible = [st for st in eligible if st in allowed]
+            if not compatible_eligible:
+                # Broaden to the full allowed set (not just underfilled stratum)
+                # to avoid deadlock when all compatible subtypes are ahead in count.
+                compatible_eligible = [st for st in self._subtypes if st in allowed]
+            if not compatible_eligible:
+                raise ValueError(
+                    f"SubtypeScheduler.select: no compatible subtypes found for cluster "
+                    f"'{cluster_id}'. CLUSTER_SUBTYPE_COMPATIBILITY entry is {allowed}, "
+                    f"but scheduler subtypes are {self._subtypes}."
+                )
+            eligible = compatible_eligible
 
         # Guarantee initial coverage inside the currently underfilled stratum.
         never_attempted = [st for st in eligible if self._attempted.get(st, 0) == 0]
@@ -203,7 +267,7 @@ class SubtypeScheduler:
         # accepted-count stratum that is currently underfilled.
         rng = random.Random(seed * 1000 + self._total_attempts)
         weights_by_subtype = dict(zip(self._subtypes, self._compute_weights()))
-        weights = [weights_by_subtype[st] for st in eligible]
+        weights = [weights_by_subtype.get(st, 1.0) for st in eligible]
         chosen = rng.choices(eligible, weights=weights, k=1)[0]
         self._log_weight_event(chosen, reason="weighted_random")
         return chosen
@@ -271,17 +335,25 @@ def _call_llm_paced(
     model_priority: Optional[List[str]] = None,
     client_override: Optional[Any] = None,
     metrics: Optional[PipelineMetrics] = None,
-) -> Tuple[str, str, float, int]:
-    """Paced LLM call with metadata logging and explicit fallback routing."""
+) -> Tuple[str, str, float, int, bool, str]:
+    """Paced LLM call with metadata logging and explicit fallback routing.
+
+    Returns:
+        (text, model_name, latency, api_calls, fallback_used, fallback_reason)
+        fallback_used is True if any model other than the primary was used.
+    """
     last_exception = ""
     start_t = time.perf_counter()
     api_calls = 0
     cli = client_override if client_override is not None else client
+    primary_model = EXPERIMENTAL_GENERATOR_POLICY["primary_model"]
     models = model_priority if model_priority is not None else _MODEL_PRIORITY
     fallback_reason = ""
+    fallback_used = False
 
     for idx, model in enumerate(models):
         if idx > 0:
+            fallback_used = True
             print(f"  [FALLBACK-ROUTING] Attempting declared fallback model [{idx}]: {model} (Reason: {fallback_reason})", flush=True)
             if metrics:
                 metrics.record_fallback_event(reason=fallback_reason)
@@ -300,7 +372,7 @@ def _call_llm_paced(
                 )
                 latency = time.perf_counter() - t0
                 text = response.choices[0].message.content or ""
-                return text, model, latency, api_calls
+                return text, model, latency, api_calls, fallback_used, fallback_reason
             except Exception as e:
                 err_class, fallback_reason = classify_api_error(e)
                 if metrics:
@@ -313,7 +385,7 @@ def _call_llm_paced(
                 break
 
     total_lat = time.perf_counter() - start_t
-    return f"LLM Generation Exception: {last_exception}", "failed_model", total_lat, api_calls
+    return f"LLM Generation Exception: {last_exception}", "failed_model", total_lat, api_calls, fallback_used, fallback_reason
 
 
 
@@ -342,11 +414,14 @@ def generate_targeted_candidate(
     subtype: str,
     seed: int,
     metrics: Optional[PipelineMetrics] = None,
-) -> Tuple[bool, Dict[str, str], str, float, int]:
+) -> Tuple[bool, Dict[str, str], str, float, int, bool, str]:
     """
     Decoupled 2-Pass Generation Pipeline (Oracle Independence - Invariant III).
     Pass 1: Generate PROBLEM_SPEC, SOLVE_OPTIMIZED, and TEST_GENERATOR.
     Pass 2: Isolated call receiving ONLY PROBLEM_SPEC to write naive/brute-force SOLVE_BRUTE.
+
+    Returns:
+        (ok, blocks, model_name, latency, api_calls, fallback_used, fallback_reason)
     """
     cluster_desc = CLUSTER_BEHAVIOR_PROMPTS.get(cluster_id, f"Target Cluster: {cluster_id}")
 
@@ -374,14 +449,14 @@ def generate_targeted_candidate(
     )
     user_pass1 = f"Generate problem spec, optimal solution, and test generator for {cluster_id} (Seed {seed})."
 
-    raw_p1, model1, lat1, ret1 = _call_llm_paced(system_pass1, user_pass1, metrics=metrics)
+    raw_p1, model1, lat1, ret1, fb1, fb_reason1 = _call_llm_paced(system_pass1, user_pass1, metrics=metrics)
 
     spec = parse_block_content(raw_p1, "### PROBLEM_SPEC")
     solve_opt = parse_block_content(raw_p1, "### SOLVE_OPTIMIZED")
     test_gen = parse_block_content(raw_p1, "### TEST_GENERATOR")
 
     if not spec or not solve_opt or not test_gen:
-        return False, {}, model1, lat1, ret1
+        return False, {}, model1, lat1, ret1, fb1, fb_reason1
 
     # Pass 2: Isolated Reference Implementation (Oracle Independence)
     system_pass2 = (
@@ -399,11 +474,11 @@ def generate_targeted_candidate(
     )
     user_pass2 = f"Here is the problem specification:\n\n{spec}\n\nWrite 'solve_brute' for this spec."
 
-    raw_p2, model2, lat2, ret2 = _call_llm_paced(system_pass2, user_pass2, metrics=metrics)
+    raw_p2, model2, lat2, ret2, fb2, fb_reason2 = _call_llm_paced(system_pass2, user_pass2, metrics=metrics)
     solve_brute = parse_block_content(raw_p2, "### SOLVE_BRUTE")
 
     if not solve_brute:
-        return False, {}, model2, lat1 + lat2, ret1 + ret2
+        return False, {}, model2, lat1 + lat2, ret1 + ret2, fb1 or fb2, fb_reason2 or fb_reason1
 
     blocks = {
         "spec": spec,
@@ -411,23 +486,24 @@ def generate_targeted_candidate(
         "solve_brute": solve_brute,
         "test_gen": test_gen,
     }
-    return True, blocks, model1, lat1 + lat2, ret1 + ret2
+    fallback_used = fb1 or fb2
+    fallback_reason = fb_reason2 if fb2 else (fb_reason1 if fb1 else "")
+    return True, blocks, model1, lat1 + lat2, ret1 + ret2, fallback_used, fallback_reason
 
 
-def calibrate_empirical_difficulty(full_code: str, seed: int) -> Tuple[float, float, float]:
-    """Estimates empirical difficulty Pass@1 and Pass@10 on base model simulation."""
-    passes = 0
-    total_trials = 10
-    random.seed(seed)
+# ---------------------------------------------------------------------------
+# V6: BaseModelProber (session-scoped singleton)
+# ---------------------------------------------------------------------------
+# Instantiated once per pipeline run.  Model loading is lazy (on first probe).
+_base_model_prober: Optional[BaseModelProber] = None
 
-    for _ in range(total_trials):
-        if random.random() > 0.4:
-            passes += 1
 
-    pass1 = passes / total_trials
-    pass10 = 1.0 if passes > 0 else 0.0
-    empirical_difficulty = 1.0 - pass10
-    return pass1, pass10, empirical_difficulty
+def _get_prober() -> BaseModelProber:
+    global _base_model_prober
+    if _base_model_prober is None:
+        _base_model_prober = BaseModelProber()
+    return _base_model_prober
+
 
 
 def run_targeted_generation_pipeline(
@@ -473,7 +549,7 @@ def run_targeted_generation_pipeline(
         planned_dist = ledger.get_subtype_distribution(target_cluster)
         for b_seed in batch_seeds:
             total_in_cluster = sum(planned_dist.values())
-            subtype = scheduler.select(ledger_dist=planned_dist, seed=b_seed)
+            subtype = scheduler.select(ledger_dist=planned_dist, seed=b_seed, cluster_id=target_cluster)
 
             if total_in_cluster > 6:
                 max_count = max(dist.values()) if dist else 0
@@ -490,15 +566,15 @@ def run_targeted_generation_pipeline(
             cluster_id: str,
             subtype: str,
             b_seed: int,
-        ) -> Tuple[int, str, bool, Dict[str, str], str, float, int]:
+        ) -> Tuple[int, str, bool, Dict[str, str], str, float, int, bool, str]:
             """Worker thunk executed in the thread pool."""
-            ok, blocks, model_name, latency, retries = generate_targeted_candidate(
+            ok, blocks, model_name, latency, retries, fallback_used, fallback_reason = generate_targeted_candidate(
                 cluster_id=cluster_id,
                 subtype=subtype,
                 seed=b_seed,
                 metrics=metrics,
             )
-            return b_seed, subtype, ok, blocks, model_name, latency, retries
+            return b_seed, subtype, ok, blocks, model_name, latency, retries, fallback_used, fallback_reason
 
         effective_batch = min(batch_size, num_samples - accepted)
         futures_map = {}
@@ -518,7 +594,7 @@ def run_targeted_generation_pipeline(
                 try:
                     result = fut.result()
                 except Exception as exc:
-                    result = (b_seed, subtype, False, {}, "failed", 0.0, 0)
+                    result = (b_seed, subtype, False, {}, "failed", 0.0, 0, False, "")
                     print(f"  [X] Batch worker exception (seed {b_seed}): {exc}")
                 results_by_seed[b_seed] = result
 
@@ -526,12 +602,18 @@ def run_targeted_generation_pipeline(
             if accepted >= num_samples:
                 break
 
-            b_seed_val, subtype, ok, blocks, model_name, latency, api_calls = results_by_seed[b_seed]
+            b_seed_val, subtype, ok, blocks, model_name, latency, api_calls, gen_fallback_used, gen_fallback_reason = results_by_seed[b_seed]
 
             metrics.record_attempt(subtype=subtype, cluster=target_cluster)
             metrics.record_gen_latency(latency)
             metrics.record_initial_generation_api_calls(api_calls)
             metrics.record_model_serving(model_name)
+
+            if gen_fallback_used:
+                print(
+                    f"  [WARN] Fallback model used for seed {b_seed_val}: {gen_fallback_reason}",
+                    flush=True,
+                )
 
             print(
                 f"\n[+] Processing Sample [{accepted + 1}/{num_samples}] "
@@ -683,7 +765,37 @@ def run_targeted_generation_pipeline(
                 scheduler.record_outcome(subtype, approved=False)
                 continue
 
-            pass1, pass10, diff = calibrate_empirical_difficulty(full_code, b_seed_val)
+            # 5. Real Base-Model Probing (V6 — replaces PRNG calibration)
+            prober = _get_prober()
+            probe_result = prober.probe(
+                problem_id=problem_id,
+                problem_spec=blocks["spec"],
+                solve_brute=blocks["solve_brute"],
+                test_gen=blocks["test_gen"],
+                seed=b_seed_val,
+            )
+            pass1 = probe_result.pass1
+            pass10 = probe_result.pass10
+            diff = probe_result.empirical_difficulty
+
+            # Compute probe_result_hash for cross-referencing
+            import hashlib as _hl, json as _js
+            probe_dict_json = _js.dumps(probe_result.to_dict(), sort_keys=True)
+            probe_hash = _hl.sha256(probe_dict_json.encode()).hexdigest()[:16]
+
+            # Determine target validation status
+            # If the probe's observed failure cluster matches the requested target,
+            # the target is VALIDATED; otherwise it is UNVERIFIED.
+            target_validation_status: str
+            if probe_result.failure_cluster_id == target_cluster:
+                target_validation_status = "VALIDATED"
+            elif probe_result.failure_cluster_id is None and diff == 0.0:
+                # Model passed all probes — no failure observed → target not refuted but not confirmed
+                target_validation_status = "UNVERIFIED"
+            else:
+                target_validation_status = "UNVERIFIED"
+
+            target_evidence_json = _js.dumps(probe_result.failure_evidence)
 
             entry = LedgerEntry(
                 problem_id=problem_id,
@@ -693,6 +805,15 @@ def run_targeted_generation_pipeline(
                 prompt_hash=prompt_hash,
                 target_failure_cluster=target_cluster,
                 monotonic_queue_subtype=subtype,
+                # V6 targeting fields
+                target_validation_status=target_validation_status,
+                target_evidence=target_evidence_json,
+                probe_result_hash=probe_hash,
+                # V6 generator policy fields
+                generator_policy="EXPERIMENTAL_GENERATOR_POLICY",
+                fallback_used=gen_fallback_used,
+                fallback_reason=gen_fallback_reason,
+                # Difficulty from real probe
                 base_pass1=pass1,
                 base_pass10=pass10,
                 empirical_difficulty=diff,
@@ -703,7 +824,7 @@ def run_targeted_generation_pipeline(
                 ast_hash=dedup_res.ast_hash,
                 cfg_hash=dedup_res.cfg_hash,
                 similarity_score=dedup_res.similarity_score,
-                acceptance_reason=f"Approved targeted candidate for {target_cluster}",
+                acceptance_reason=f"Approved targeted candidate for {target_cluster} [target_validation={target_validation_status}]",
                 code_content=full_code,
                 spec=blocks["spec"],
             )
@@ -713,7 +834,8 @@ def run_targeted_generation_pipeline(
             scheduler.record_outcome(subtype, approved=True)
             print(
                 f"  [\u2713] ACCEPTED & RECORDED: {problem_id} "
-                f"(Diff: {diff:.2f}, AST: {dedup_res.ast_hash})"
+                f"(Diff: {diff:.2f}, AST: {dedup_res.ast_hash}, "
+                f"TargetValidation: {target_validation_status})"
             )
 
     metrics.flush(

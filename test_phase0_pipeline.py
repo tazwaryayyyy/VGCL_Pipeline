@@ -1067,16 +1067,16 @@ class TestPhase0Pipeline(unittest.TestCase):
         self.assertEqual(pass10, 1.0)
         self.assertEqual(diff, 0.0)
 
-    def test_36_freeze_v5_tag_and_manifest_identity(self):
-        """Test 36: Freeze tag is phase0-experiment-freeze-v5 in manifest and config."""
+    def test_36_freeze_v6_tag_and_manifest_identity(self):
+        """Test 36: Freeze tag is phase0-experiment-freeze-v6 in manifest and config."""
         from generation_manifest import FROZEN_EXPERIMENT_CONFIG, create_generation_manifest
         from generation_manifest import load_yaml_config
 
-        self.assertEqual(FROZEN_EXPERIMENT_CONFIG["freeze_tag"], "phase0-experiment-freeze-v5")
+        self.assertEqual(FROZEN_EXPERIMENT_CONFIG["freeze_tag"], "phase0-experiment-freeze-v6")
         manifest = create_generation_manifest(output_path=None)
-        self.assertEqual(manifest["freeze_tag"], "phase0-experiment-freeze-v5")
+        self.assertEqual(manifest["freeze_tag"], "phase0-experiment-freeze-v6")
         cfg = load_yaml_config()
-        self.assertEqual(cfg["generation_configuration"]["freeze_tag"], "phase0-experiment-freeze-v5")
+        self.assertEqual(cfg["generation_configuration"]["freeze_tag"], "phase0-experiment-freeze-v6")
 
     def test_37_adversarial_hidden_loops_and_misleading_comments(self):
         """Test 37: Misleading comments cannot hide dominant nested loops over large regimes."""
@@ -1096,6 +1096,167 @@ class TestPhase0Pipeline(unittest.TestCase):
         compat = check_constraint_regime_compatibility(spec, solve_opt)
         self.assertEqual(compat["status"], "REJECT")
         self.assertIn("structural scaling incompatibility", compat["reason"])
+
+    def test_38_base_model_prober_contract(self):
+        """Test 38: BaseModelProber defines frozen Qwen-2.5-1.5B policy with immutable hash."""
+        from base_model_prober import (
+            BASE_MODEL_ID,
+            PROBING_POLICY,
+            _PROBING_POLICY_HASH,
+            ProbingResult,
+            BaseModelProber,
+        )
+
+        self.assertEqual(BASE_MODEL_ID, "Qwen/Qwen2.5-1.5B-Instruct")
+        self.assertEqual(PROBING_POLICY["k_samples"], 10)
+        self.assertEqual(PROBING_POLICY["temperature_pass1"], 0.0)
+        self.assertEqual(PROBING_POLICY["temperature_pass10"], 0.8)
+        self.assertTrue(len(_PROBING_POLICY_HASH) == 16)
+
+        # Verify candidate execution engine inside prober
+        solve_code = "def solve(nums):\n    return sorted(nums)\n"
+        brute_code = "def solve_brute(nums):\n    return sorted(nums)\n"
+        tgen_code = (
+            "import random\n"
+            "def generate_test_cases(seed, scale, max_small_dimension=8):\n"
+            "    random.seed(seed)\n"
+            "    return [([random.randint(-10, 10) for _ in range(5)],)]\n"
+        )
+        passed, exc, err, elapsed, mem = BaseModelProber._execute_candidate(
+            solve_code, tgen_code, brute_code, seed=42
+        )
+        self.assertTrue(passed)
+        self.assertEqual(exc, "")
+
+        # Verify failing candidate detection
+        failing_solve = "def solve(nums):\n    return nums\n"
+        passed_f, exc_f, err_f, elapsed_f, mem_f = BaseModelProber._execute_candidate(
+            failing_solve, tgen_code, brute_code, seed=42
+        )
+        self.assertFalse(passed_f)
+        self.assertEqual(exc_f, "MismatchError")
+
+    def test_39_cluster_subtype_compatibility_policy_enforcement(self):
+        """Test 39: SubtypeScheduler enforces CLUSTER_SUBTYPE_COMPATIBILITY and rejects semantic drift."""
+        from targeted_generation import (
+            CLUSTER_SUBTYPE_COMPATIBILITY,
+            SUBTYPES,
+            SubtypeScheduler,
+        )
+
+        # All declared clusters have non-empty compatible subtype lists
+        for cluster_id, compatible in CLUSTER_SUBTYPE_COMPATIBILITY.items():
+            self.assertGreater(len(compatible), 0)
+            for st in compatible:
+                self.assertIn(st, SUBTYPES)
+
+        # Scheduler must select only compatible subtypes for a cluster
+        scheduler = SubtypeScheduler(subtypes=SUBTYPES)
+        ledger_dist = {st: 0 for st in SUBTYPES}
+        for seed_idx in range(20):
+            selected = scheduler.select(
+                ledger_dist=ledger_dist,
+                seed=1000 + seed_idx,
+                cluster_id="FC_02_SCALE_DIVERGENCE",
+            )
+            self.assertIn(
+                selected,
+                CLUSTER_SUBTYPE_COMPATIBILITY["FC_02_SCALE_DIVERGENCE"],
+                f"Scheduler selected incompatible subtype '{selected}' for FC_02",
+            )
+
+        # Scheduler must raise ValueError if cluster_id is unknown
+        with self.assertRaises(ValueError):
+            scheduler.select(
+                ledger_dist=ledger_dist,
+                seed=1000,
+                cluster_id="FC_NON_EXISTENT",
+            )
+
+    def test_40_ledger_v6_target_attribution_schema(self):
+        """Test 40: LedgerEntry V6 fields and SQLite migration/query support."""
+        from experiment_ledger import ExperimentLedger, LedgerEntry
+
+        db_path = os.path.join(self.test_dir, "test_v6_ledger.db")
+        jsonl_path = os.path.join(self.test_dir, "test_v6_ledger.jsonl")
+        ledger = ExperimentLedger(db_path=db_path, jsonl_path=jsonl_path)
+
+        entry_validated = LedgerEntry(
+            problem_id="PROB_V6_001",
+            seed=1001,
+            target_failure_cluster="FC_01_MICRO_CORRECTNESS",
+            monotonic_queue_subtype="Type A: sliding-window extrema",
+            target_validation_status="VALIDATED",
+            target_evidence='{"exception_type": "MismatchError"}',
+            probe_result_hash="abc123def4567890",
+            generator_policy="EXPERIMENTAL_GENERATOR_POLICY",
+            fallback_used=False,
+            fallback_reason="",
+            base_pass1=0.0,
+            base_pass10=0.0,
+            empirical_difficulty=1.0,
+        )
+        ledger.record_entry(entry_validated)
+
+        entry_unverified = LedgerEntry(
+            problem_id="PROB_V6_002",
+            seed=1002,
+            target_failure_cluster="FC_02_SCALE_DIVERGENCE",
+            monotonic_queue_subtype="Type B: bounded-transition DP",
+            target_validation_status="UNVERIFIED",
+            target_evidence="{}",
+            probe_result_hash="",
+            generator_policy="EXPERIMENTAL_GENERATOR_POLICY",
+            fallback_used=True,
+            fallback_reason="quota_exhaustion: 429",
+            base_pass1=1.0,
+            base_pass10=1.0,
+            empirical_difficulty=0.0,
+        )
+        ledger.record_entry(entry_unverified)
+
+        summary = ledger.get_target_validation_summary()
+        self.assertEqual(summary["total_entries"], 2)
+        self.assertEqual(summary["validation_counts"]["VALIDATED"], 1)
+        self.assertEqual(summary["validation_counts"]["UNVERIFIED"], 1)
+        self.assertAlmostEqual(summary["validated_fraction"], 0.5)
+
+        gen_dist = ledger.get_generator_model_distribution()
+        self.assertEqual(gen_dist["total_entries"], 2)
+        self.assertEqual(gen_dist["primary_count"], 2)
+
+    def test_41_fallback_policy_accounting(self):
+        """Test 41: Fallback models are tracked in ledger without silently mutating primary status."""
+        from experiment_ledger import ExperimentLedger, LedgerEntry
+
+        db_path = os.path.join(self.test_dir, "test_fb.db")
+        jsonl_path = os.path.join(self.test_dir, "test_fb.jsonl")
+        ledger = ExperimentLedger(db_path=db_path, jsonl_path=jsonl_path)
+
+        entry = LedgerEntry(
+            problem_id="PROB_FB_001",
+            seed=2001,
+            generator_model="gemini-3.1-flash-lite",
+            generator_version="v1.0",
+            target_failure_cluster="FC_01_MICRO_CORRECTNESS",
+            monotonic_queue_subtype="Type A: sliding-window extrema",
+            target_validation_status="VALIDATED",
+            generator_policy="EXPERIMENTAL_GENERATOR_POLICY",
+            fallback_used=True,
+            fallback_reason="quota_exhaustion: ResourceExhausted: rate limit exceeded",
+        )
+        ledger.record_entry(entry)
+
+        entries = ledger.get_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["generator_model"], "gemini-3.1-flash-lite")
+        self.assertEqual(entries[0]["fallback_used"], 1)
+        self.assertEqual(
+            entries[0]["fallback_reason"],
+            "quota_exhaustion: ResourceExhausted: rate limit exceeded",
+        )
+
+
 
 
 if __name__ == "__main__":
