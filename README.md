@@ -94,7 +94,7 @@ python -m unittest test_phase0_pipeline.py
 - **Targeted Pipeline (`targeted_generation.py`)**: Prompts candidate problems targeted specifically at empirical execution failure clusters (`FC_01`..`FC_08`).
 - **Uniform Control Pipeline (`uniform_generation.py`)**: Identical generator model, decoupled 2-pass oracle, deduplication, ledger schema, and rate control, differing **only** by sampling uniformly across failure categories without failure targeting.
 
-## Generator Model Policy (Frozen at phase0-experiment-freeze-v5)
+## Generator Model Policy (Frozen at phase0-experiment-freeze-v7)
 
 Both pipelines use the same explicit `EXPERIMENTAL_GENERATOR_POLICY`:
 
@@ -105,9 +105,8 @@ Both pipelines use the same explicit `EXPERIMENTAL_GENERATOR_POLICY`:
 | Temperature | `0.4` |
 | Rate limit | `15 RPM` |
 
-- Fallback is free-tier quota failover only. Every API call records the actual serving model in quarantine artifacts and the ledger `generator_model` field.
-- Different fallback models are **not scientifically equivalent**. Their identities remain visible; no post-hoc normalization is performed.
-- Both pipelines import `EXPERIMENTAL_GENERATOR_POLICY` and `_MODEL_PRIORITY` from `targeted_generation.py` — they are the same objects, verified by `test_18`.
+- Fallback candidates are strictly quarantined to auxiliary datasets (`data/v7_auxiliary_curriculum.jsonl`, `data/v7_uniform_auxiliary_curriculum.jsonl`) and **never enter the primary curriculum dataset**.
+- Both pipelines import `EXPERIMENTAL_GENERATOR_POLICY` and `_MODEL_PRIORITY` from `targeted_generation.py` — verified by test suites.
 
 ## Reference-Independence Threshold (Frozen at 0.85)
 

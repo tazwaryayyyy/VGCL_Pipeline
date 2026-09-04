@@ -470,3 +470,207 @@ def check_constraint_regime_compatibility(spec: str, solve_opt: str) -> Dict[str
         "structural_flags": flags,
         "reason": f"structural checks compatible with declared constraint regime ({constraints['summary']})",
     }
+
+
+# ---------------------------------------------------------------------------
+# V7: Authoritative Primary Eligibility Predicate
+# ---------------------------------------------------------------------------
+
+
+def check_primary_eligibility(
+    entry: Any,
+    condition_type: str = "TARGETED",
+    primary_model: str = "gemini-3.6-flash",
+) -> Dict[str, Any]:
+    """
+    Canonical single source of truth for primary dataset eligibility in VGCL Phase 0.
+
+    Distinguishes:
+      - PRIMARY_ELIGIBLE: Meets all strict scientific validity, provenance, and control criteria.
+      - AUXILIARY_NON_PRIMARY: Verified code package but ineligible for primary dataset
+        (e.g., fallback generator used, or target was unverified / did not replicate on base model).
+      - QUARANTINED / REJECTED: Failed oracle verification, deduplication, or quality gates.
+
+    Args:
+        entry: LedgerEntry object or dictionary containing candidate record metadata.
+        condition_type: "TARGETED" for targeted curriculum or "UNIFORM" for uniform control.
+        primary_model: Expected frozen primary generator model identifier.
+
+    Returns:
+        Dict with keys:
+          - "status": "PRIMARY_ELIGIBLE" | "AUXILIARY_NON_PRIMARY" | "REJECTED"
+          - "is_primary": bool
+          - "reasons": List[str]
+          - "condition_type": str
+    """
+    import json as _json
+
+    # Canonical subtypes and cluster compatibility imported lazily to prevent circular imports
+    canonical_subtypes = [
+        "Type A: sliding-window extrema",
+        "Type B: bounded-transition DP",
+        "Type C: prefix-sum deque optimization",
+        "Type D: convex optimization deque",
+        "Type E: shortest-path deque variants",
+        "Type F: hybrid stack/deque structures",
+    ]
+    canonical_cluster_compat = {
+        "FC_01_MICRO_CORRECTNESS": [
+            "Type A: sliding-window extrema",
+            "Type B: bounded-transition DP",
+            "Type D: convex optimization deque",
+            "Type F: hybrid stack/deque structures",
+        ],
+        "FC_02_SCALE_DIVERGENCE": [
+            "Type B: bounded-transition DP",
+            "Type C: prefix-sum deque optimization",
+            "Type D: convex optimization deque",
+        ],
+        "FC_03_TERMINATION": [
+            "Type C: prefix-sum deque optimization",
+            "Type E: shortest-path deque variants",
+            "Type F: hybrid stack/deque structures",
+        ],
+        "FC_04_BOUNDS_VIOLATION": [
+            "Type A: sliding-window extrema",
+            "Type D: convex optimization deque",
+            "Type E: shortest-path deque variants",
+        ],
+        "FC_05_RESOURCE_FAILURE": [
+            "Type C: prefix-sum deque optimization",
+            "Type D: convex optimization deque",
+            "Type E: shortest-path deque variants",
+        ],
+        "FC_06_FORMAT_CONTRACT": [
+            "Type A: sliding-window extrema",
+            "Type F: hybrid stack/deque structures",
+        ],
+        "FC_07_STATE_INCONSISTENCY": [
+            "Type B: bounded-transition DP",
+            "Type E: shortest-path deque variants",
+            "Type F: hybrid stack/deque structures",
+        ],
+        "FC_08_UNKNOWN": list(canonical_subtypes),
+    }
+
+    if isinstance(entry, dict):
+        d = entry
+    elif hasattr(entry, "to_dict"):
+        d = entry.to_dict()
+    else:
+        d = vars(entry)
+
+    reasons: List[str] = []
+    condition = condition_type.upper()
+
+    # 1. Oracle Verification Invariant (Phase A + Phase B + Approved status)
+    phase_a_count = int(d.get("phase_a_pass_count", 0))
+    phase_b_pass = bool(d.get("phase_b_pass", False))
+    ver_status = str(d.get("verification_status", ""))
+    if phase_a_count <= 0 or not phase_b_pass or ver_status != "APPROVED":
+        reasons.append(
+            f"Oracle verification not satisfied (Phase A: {phase_a_count}, Phase B: {phase_b_pass}, Status: {ver_status})"
+        )
+
+    # 2. Structural Deduplication Invariant
+    ast_hash = str(d.get("ast_hash", ""))
+    sim_score = float(d.get("similarity_score", 0.0))
+    if not ast_hash or sim_score >= 0.70:
+        reasons.append(
+            f"Deduplication invariant not satisfied (ast_hash='{ast_hash}', sim_score={sim_score:.3f} >= 0.70)"
+        )
+
+    # 3. Evaluation Leakage & Reviewer Invariant
+    if bool(d.get("reviewer_override", False)):
+        reasons.append("Reviewer override detected (manual intervention violates unassisted generation)")
+
+    # 4. Generator Model & Fallback Invariant (No fallback contamination in primary)
+    fallback_used = bool(d.get("fallback_used", False))
+    fb_p1 = bool(d.get("fallback_used_pass1", False))
+    fb_p2 = bool(d.get("fallback_used_pass2", False))
+    gen_model = str(d.get("generator_model", ""))
+    m_p1 = str(d.get("generator_model_pass1", gen_model))
+    m_p2 = str(d.get("generator_model_pass2", gen_model))
+    gen_policy = str(d.get("generator_policy", ""))
+
+    if fallback_used or fb_p1 or fb_p2:
+        reasons.append("Generator fallback activated (fallback output cannot enter primary dataset)")
+    if gen_model != primary_model or m_p1 != primary_model or m_p2 != primary_model:
+        reasons.append(
+            f"Generator model mismatch (expected '{primary_model}', observed '{gen_model}' [p1='{m_p1}', p2='{m_p2}'])"
+        )
+    if gen_policy != "EXPERIMENTAL_GENERATOR_POLICY":
+        reasons.append(f"Invalid generator policy: '{gen_policy}'")
+
+    # 5. Shared Domain Support Invariant
+    declared_subtype = str(d.get("monotonic_queue_subtype", ""))
+    if declared_subtype not in canonical_subtypes:
+        reasons.append(f"Subtype '{declared_subtype}' outside declared common domain support")
+
+    # 6. Condition-Specific Provenance and Targeting Invariants
+    probe_hash = str(d.get("probe_result_hash", ""))
+
+    if condition == "TARGETED":
+        val_status = str(d.get("target_validation_status", ""))
+        target_cluster = str(d.get("target_failure_cluster", ""))
+        target_evidence_raw = d.get("target_evidence", "{}")
+
+        if val_status != "VALIDATED":
+            reasons.append(f"Target validation status is '{val_status}' (must be 'VALIDATED' for targeted primary)")
+        if not probe_hash:
+            reasons.append("Missing probe_result_hash (empirical probe provenance required)")
+
+        target_evidence: Dict[str, Any] = {}
+        if isinstance(target_evidence_raw, str):
+            try:
+                target_evidence = _json.loads(target_evidence_raw)
+            except Exception:
+                target_evidence = {}
+        elif isinstance(target_evidence_raw, dict):
+            target_evidence = target_evidence_raw
+
+        if not target_evidence or "exception_type" not in target_evidence:
+            reasons.append("Missing or unparseable target_evidence in probe record")
+
+        allowed_subtypes = canonical_cluster_compat.get(target_cluster, [])
+        if declared_subtype not in allowed_subtypes:
+            reasons.append(
+                f"Subtype '{declared_subtype}' is incompatible with target cluster '{target_cluster}' under CLUSTER_SUBTYPE_COMPATIBILITY"
+            )
+
+    elif condition == "UNIFORM":
+        target_cluster = str(d.get("target_failure_cluster", ""))
+        val_status = str(d.get("target_validation_status", ""))
+        if target_cluster != "UNIFORM_CONTROL":
+            reasons.append(f"Uniform control item must have target_failure_cluster='UNIFORM_CONTROL', observed '{target_cluster}'")
+        if val_status != "NOT_APPLICABLE":
+            reasons.append(f"Uniform control item must have target_validation_status='NOT_APPLICABLE', observed '{val_status}'")
+        if not probe_hash:
+            reasons.append("Missing probe_result_hash for base model difficulty measurement")
+    else:
+        raise ValueError(f"Unknown condition_type: '{condition_type}'. Must be 'TARGETED' or 'UNIFORM'.")
+
+    is_primary = len(reasons) == 0
+    if is_primary:
+        status = "PRIMARY_ELIGIBLE"
+    elif ver_status == "APPROVED" and (fallback_used or d.get("target_validation_status") == "UNVERIFIED"):
+        status = "AUXILIARY_NON_PRIMARY"
+    else:
+        status = "REJECTED"
+
+    return {
+        "status": status,
+        "is_primary": is_primary,
+        "reasons": reasons,
+        "condition_type": condition,
+    }
+
+
+def check_primary_targeted_eligibility(entry: Any, primary_model: str = "gemini-3.6-flash") -> Dict[str, Any]:
+    """Convenience wrapper for targeted primary eligibility check."""
+    return check_primary_eligibility(entry, condition_type="TARGETED", primary_model=primary_model)
+
+
+def check_primary_uniform_eligibility(entry: Any, primary_model: str = "gemini-3.6-flash") -> Dict[str, Any]:
+    """Convenience wrapper for uniform control primary eligibility check."""
+    return check_primary_eligibility(entry, condition_type="UNIFORM", primary_model=primary_model)

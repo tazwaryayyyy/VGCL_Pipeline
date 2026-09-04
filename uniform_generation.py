@@ -34,6 +34,7 @@ from syntax_repair import (
 from generation_manifest import create_generation_manifest
 from targeted_generation import (
     EXPERIMENTAL_GENERATOR_POLICY,
+    SUBTYPES,
     _MODEL_PRIORITY,
     _call_llm_paced,
     _get_prober,
@@ -41,38 +42,31 @@ from targeted_generation import (
     parse_block_content,
 )
 from base_model_prober import BaseModelProber
+from quality_gates import check_primary_uniform_eligibility
 
 
 load_dotenv()
 
-UNIFORM_CLUSTERS = [
-    "FC_01_MICRO_CORRECTNESS",
-    "FC_02_SCALE_DIVERGENCE",
-    "FC_03_TERMINATION",
-    "FC_04_BOUNDS_VIOLATION",
-    "FC_05_RESOURCE_FAILURE",
-    "FC_06_FORMAT_CONTRACT",
-    "FC_07_STATE_INCONSISTENCY",
-    "FC_08_UNKNOWN",
-]
-
 
 def generate_uniform_candidate(
-    cluster_id: str,
+    subtype: str,
     seed: int,
     metrics: Optional[PipelineMetrics] = None,
-) -> Tuple[bool, Dict[str, str], str, float, int, bool, str]:
+) -> Tuple[bool, Dict[str, str], str, str, float, int, bool, bool, str, str]:
     """
     Decoupled 2-Pass Generation Pipeline (Control Condition - Invariant V).
-    Pass 1: Generate PROBLEM_SPEC, SOLVE_OPTIMIZED, and TEST_GENERATOR uniformly without failure targeting.
+    Pass 1: Generate PROBLEM_SPEC, SOLVE_OPTIMIZED, and TEST_GENERATOR uniformly from the shared
+    support domain (Monotonic Queue / Deque) without failure targeting or cluster descriptions.
     Pass 2: Isolated call receiving ONLY PROBLEM_SPEC to write naive/brute-force SOLVE_BRUTE.
 
     Returns:
-        (ok, blocks, model_name, latency, api_calls, fallback_used, fallback_reason)
+        (ok, blocks, model1, model2, latency, api_calls, fb1, fb2, fb_reason1, fb_reason2)
     """
     system_pass1 = (
         "You are a principal competitive programming problem architect. Design a self-contained, "
         "mathematically sound algorithmic problem package.\n\n"
+        f"Algorithmic Domain: Monotonic Queue / Deque Structures\n"
+        f"Subtype Stratification: {subtype}\n\n"
         "### OUTPUT FORMAT CONTRACT (Pass 1):\n"
         "Output EXACTLY three headers:\n\n"
         "### PROBLEM_SPEC\n"
@@ -88,7 +82,7 @@ def generate_uniform_candidate(
         "    # scale=='small': dimensions <= max_small_dimension (default 8, or bounded cap if specified);\n"
         "    # scale=='large': derive dimensions from declared problem scale constraints (e.g. N >= 100)\n"
     )
-    user_pass1 = f"Generate a general algorithmic problem package (Seed {seed})."
+    user_pass1 = f"Generate problem spec, optimal solution, and test generator for subtype '{subtype}' (Seed {seed})."
 
     raw_p1, model1, lat1, ret1, fb1, fb_reason1 = _call_llm_paced(system_pass1, user_pass1, metrics=metrics)
 
@@ -97,7 +91,7 @@ def generate_uniform_candidate(
     test_gen = parse_block_content(raw_p1, "### TEST_GENERATOR")
 
     if not spec or not solve_opt or not test_gen:
-        return False, {}, model1, lat1, ret1, fb1, fb_reason1
+        return False, {}, model1, "", lat1, ret1, fb1, False, fb_reason1, ""
 
     # Pass 2: Isolated Reference Implementation (Oracle Independence - Invariant III)
     system_pass2 = (
@@ -119,7 +113,7 @@ def generate_uniform_candidate(
     solve_brute = parse_block_content(raw_p2, "### SOLVE_BRUTE")
 
     if not solve_brute:
-        return False, {}, model2, lat1 + lat2, ret1 + ret2, fb1 or fb2, fb_reason2 or fb_reason1
+        return False, {}, model1, model2, lat1 + lat2, ret1 + ret2, fb1, fb2, fb_reason1, fb_reason2
 
     blocks = {
         "spec": spec,
@@ -127,38 +121,38 @@ def generate_uniform_candidate(
         "solve_brute": solve_brute,
         "test_gen": test_gen,
     }
-    fallback_used = fb1 or fb2
-    fallback_reason = fb_reason2 if fb2 else (fb_reason1 if fb1 else "")
-    return True, blocks, model1, lat1 + lat2, ret1 + ret2, fallback_used, fallback_reason
-
+    return True, blocks, model1, model2, lat1 + lat2, ret1 + ret2, fb1, fb2, fb_reason1, fb_reason2
 
 
 def run_uniform_generation_pipeline(
     num_samples: int = 5,
-    db_path: str = "data/uniform_experiment_ledger.db",
-    jsonl_path: str = "data/uniform_approved_curriculum.jsonl",
+    db_path: str = "data/v7_uniform_experiment_ledger.db",
+    jsonl_path: str = "data/v7_uniform_approved_curriculum.jsonl",
+    aux_jsonl_path: str = "data/v7_uniform_auxiliary_curriculum.jsonl",
     batch_size: int = 1,
     metrics: Optional[PipelineMetrics] = None,
 ) -> None:
     """
-    Uniform sampling control generation loop.
+    Uniform sampling control generation loop with shared domain support and V7 primary gating.
 
     Args:
-        num_samples: Number of verified, deduplicated samples to accept.
-        db_path:     SQLite ledger path for the uniform condition.
-        jsonl_path:  JSONL output path for the uniform condition.
-        batch_size:  Number of parallel generation calls per outer iteration.
-                     Default ``1`` preserves the original serial behaviour.
-        metrics:     Optional ``PipelineMetrics`` instance.  When ``None``,
-                     a private instance is created and flushed on completion.
+        num_samples:    Number of verified, deduplicated primary samples to accept.
+        db_path:        SQLite ledger path for the uniform condition.
+        jsonl_path:     JSONL output path for the primary uniform condition.
+        aux_jsonl_path: JSONL output path for auxiliary uniform records.
+        batch_size:     Number of parallel generation calls per outer iteration.
+        metrics:        Optional PipelineMetrics instance.
     """
     print("=== STARTING UNIFORM SAMPLING CONTROL GENERATION PIPELINE ===")
     manifest = create_generation_manifest(output_path="data/generation_manifest_uniform.json")
-    print(f"  [MANIFEST] Frozen manifest recorded (Freeze: {manifest.get('freeze_tag')}, Primary Model: {manifest.get('generator_model')})")
+    print(
+        f"  [MANIFEST] Frozen manifest recorded (Freeze: {manifest.get('freeze_tag')}, "
+        f"Primary Model: {manifest.get('generator_model')})"
+    )
 
     oracle = VerificationOracle(quarantine_dir="data/quarantine_uniform")
     dedup = StructuralDeduplicationEngine(similarity_threshold=0.70)
-    ledger = ExperimentLedger(db_path=db_path, jsonl_path=jsonl_path)
+    ledger = ExperimentLedger(db_path=db_path, jsonl_path=jsonl_path, aux_jsonl_path=aux_jsonl_path)
 
     if metrics is None:
         metrics = PipelineMetrics()
@@ -171,23 +165,23 @@ def run_uniform_generation_pipeline(
         batch_seeds = [seed + i + 1 for i in range(batch_size)]
         seed += batch_size
 
-        # Cluster IDs for this batch (round-robin, unchanged from original)
-        batch_clusters = [
-            UNIFORM_CLUSTERS[(accepted + i) % len(UNIFORM_CLUSTERS)]
+        # Subtypes for this batch sampled round-robin across shared domain support
+        batch_subtypes = [
+            SUBTYPES[(accepted + i) % len(SUBTYPES)]
             for i in range(batch_size)
         ]
 
         def _generate_one_uniform(
-            cluster_id: str,
+            subtype: str,
             b_seed: int,
-        ) -> Tuple[int, str, bool, Dict[str, str], str, float, int, bool, str]:
+        ) -> Tuple[int, str, bool, Dict[str, str], str, str, float, int, bool, bool, str, str]:
             """Worker thunk executed in the thread pool."""
-            ok, blocks, model_name, latency, retries, fallback_used, fallback_reason = generate_uniform_candidate(
-                cluster_id=cluster_id,
+            ok, blocks, m1, m2, latency, retries, fb1, fb2, fb_r1, fb_r2 = generate_uniform_candidate(
+                subtype=subtype,
                 seed=b_seed,
                 metrics=metrics,
             )
-            return b_seed, cluster_id, ok, blocks, model_name, latency, retries, fallback_used, fallback_reason
+            return b_seed, subtype, ok, blocks, m1, m2, latency, retries, fb1, fb2, fb_r1, fb_r2
 
         effective_batch = min(batch_size, num_samples - accepted)
         futures_map = {}
@@ -195,18 +189,18 @@ def run_uniform_generation_pipeline(
             for i in range(effective_batch):
                 fut = executor.submit(
                     _generate_one_uniform,
-                    batch_clusters[i],
+                    batch_subtypes[i],
                     batch_seeds[i],
                 )
-                futures_map[fut] = (batch_seeds[i], batch_clusters[i])
+                futures_map[fut] = (batch_seeds[i], batch_subtypes[i])
 
             results_by_seed: Dict[int, Any] = {}
             for fut in as_completed(futures_map):
-                b_seed, cluster_id = futures_map[fut]
+                b_seed, subtype = futures_map[fut]
                 try:
                     result = fut.result()
                 except Exception as exc:
-                    result = (b_seed, cluster_id, False, {}, "failed", 0.0, 0, False, "")
+                    result = (b_seed, subtype, False, {}, "failed", "failed", 0.0, 0, False, False, "", "")
                     print(f"  [X] Batch worker exception (seed {b_seed}): {exc}")
                 results_by_seed[b_seed] = result
 
@@ -215,17 +209,21 @@ def run_uniform_generation_pipeline(
             if accepted >= num_samples:
                 break
 
-            b_seed_val, cluster_id, ok, blocks, model_name, latency, api_calls, gen_fallback_used, gen_fallback_reason = results_by_seed[b_seed]
+            b_seed_val, subtype, ok, blocks, m1, m2, latency, api_calls, fb1, fb2, fb_r1, fb_r2 = results_by_seed[b_seed]
 
-            metrics.record_attempt(cluster=cluster_id)
+            metrics.record_attempt(cluster="UNIFORM_CONTROL")
             metrics.record_gen_latency(latency)
             metrics.record_initial_generation_api_calls(api_calls)
-            metrics.record_model_serving(model_name)
+            metrics.record_model_serving(m1)
 
+            gen_fallback_used = fb1 or fb2
+            gen_fallback_reason = f"Pass1: {fb_r1} | Pass2: {fb_r2}".strip(" |") if gen_fallback_used else ""
+            primary_model_name = EXPERIMENTAL_GENERATOR_POLICY["primary_model"]
+            effective_model = primary_model_name if not gen_fallback_used else (f"{m1}+{m2}" if m1 != m2 else m1)
 
             print(
                 f"\n[+] Generating Uniform Sample [{accepted + 1}/{num_samples}] "
-                f"| Category: '{cluster_id}' | Seed: {b_seed_val}"
+                f"| Subtype: '{subtype}' | Seed: {b_seed_val}"
             )
 
             if not ok:
@@ -248,8 +246,8 @@ def run_uniform_generation_pipeline(
                     retry_ok, new_blocks, retry_prov, retry_calls = regenerate_syntax_component(
                         component_name=malformed_comp,
                         blocks=blocks,
-                        cluster_id=cluster_id,
-                        subtype=cluster_id,
+                        cluster_id="UNIFORM_CONTROL",
+                        subtype=subtype,
                         seed=b_seed_val,
                         llm_caller=_call_llm_paced,
                         original_error=err_msg,
@@ -271,7 +269,7 @@ def run_uniform_generation_pipeline(
                     oracle.quarantine(
                         seed=b_seed_val,
                         prompt_hash=prompt_hash,
-                        generator_model=model_name,
+                        generator_model=effective_model,
                         generator_version="v1.0",
                         optimized_code=blocks.get("solve_opt", ""),
                         reference_code=blocks.get("solve_brute", ""),
@@ -294,7 +292,7 @@ def run_uniform_generation_pipeline(
                 oracle.quarantine(
                     seed=b_seed_val,
                     prompt_hash=prompt_hash,
-                    generator_model=model_name,
+                    generator_model=effective_model,
                     generator_version="v1.0",
                     optimized_code=blocks.get("solve_opt", ""),
                     reference_code=blocks.get("solve_brute", ""),
@@ -305,14 +303,14 @@ def run_uniform_generation_pipeline(
                 metrics.record_reference_independence_rejection()
                 continue
 
-            # 2. Subtype Validity Gate (validates if subtype starts with Type A-F; passes if general/NOT_VALIDATABLE)
-            st_val = validate_subtype(cluster_id, blocks["spec"], blocks["solve_opt"])
+            # 2. Subtype Validity Gate (validates that uniform sample matches shared domain subtype)
+            st_val = validate_subtype(subtype, blocks["spec"], blocks["solve_opt"])
             if st_val["status"] == "REJECT":
-                print(f"  [X] Subtype Validation Failed for '{cluster_id}': {st_val['reason']}")
+                print(f"  [X] Subtype Validation Failed for '{subtype}': {st_val['reason']}")
                 oracle.quarantine(
                     seed=b_seed_val,
                     prompt_hash=prompt_hash,
-                    generator_model=model_name,
+                    generator_model=effective_model,
                     generator_version="v1.0",
                     optimized_code=blocks.get("solve_opt", ""),
                     reference_code=blocks.get("solve_brute", ""),
@@ -330,7 +328,7 @@ def run_uniform_generation_pipeline(
                 full_code=full_code,
                 seed=b_seed_val,
                 prompt_hash=prompt_hash,
-                generator_model=model_name,
+                generator_model=effective_model,
                 solve_opt=blocks["solve_opt"],
                 solve_brute=blocks["solve_brute"],
                 test_gen=blocks["test_gen"],
@@ -367,7 +365,7 @@ def run_uniform_generation_pipeline(
                 metrics.record_dedup_rejection()
                 continue
 
-            # 5. Real Base-Model Probing (V6 — replaces PRNG calibration)
+            # 5. Real Base-Model Probing (V7: Execution against frozen Qwen base model for difficulty)
             prober = _get_prober()
             probe_result = prober.probe(
                 problem_id=problem_id,
@@ -382,25 +380,31 @@ def run_uniform_generation_pipeline(
 
             probe_dict_json = json.dumps(probe_result.to_dict(), sort_keys=True)
             probe_hash = hashlib.sha256(probe_dict_json.encode()).hexdigest()[:16]
-
             target_evidence_json = json.dumps(probe_result.failure_evidence)
 
-            # 6. Record in Ledger
+            # 6. Construct Ledger Entry
             entry = LedgerEntry(
                 problem_id=problem_id,
                 seed=b_seed_val,
-                generator_model=model_name,
+                generator_model=effective_model,
                 generator_version="v1.0",
                 prompt_hash=prompt_hash,
                 target_failure_cluster="UNIFORM_CONTROL",
-                monotonic_queue_subtype=cluster_id,
-                # V6 targeting and policy fields
+                monotonic_queue_subtype=subtype,
+                # Target attribution (NOT_APPLICABLE for uniform control)
                 target_validation_status="NOT_APPLICABLE",
                 target_evidence=target_evidence_json,
                 probe_result_hash=probe_hash,
+                # Generator policy fields
                 generator_policy="EXPERIMENTAL_GENERATOR_POLICY",
+                generator_model_pass1=m1,
+                generator_model_pass2=m2,
                 fallback_used=gen_fallback_used,
+                fallback_used_pass1=fb1,
+                fallback_used_pass2=fb2,
                 fallback_reason=gen_fallback_reason,
+                fallback_reason_pass1=fb_r1,
+                fallback_reason_pass2=fb_r2,
                 # Difficulty from real probe
                 base_pass1=pass1,
                 base_pass10=pass10,
@@ -416,14 +420,28 @@ def run_uniform_generation_pipeline(
                 code_content=full_code,
                 spec=blocks["spec"],
             )
-            ledger.record_entry(entry)
-            accepted += 1
-            metrics.record_approved(cluster=cluster_id)
-            print(
-                f"  [✓] ACCEPTED & RECORDED (CONTROL): {problem_id} "
-                f"(Diff: {diff:.2f}, AST: {dedup_res.ast_hash})"
+
+            # 7. V7 Authoritative Primary Eligibility Gate (Uniform)
+            eligibility = check_primary_uniform_eligibility(entry)
+            entry.primary_eligibility_status = eligibility["status"]
+            entry.primary_eligibility_reason = (
+                "; ".join(eligibility["reasons"]) if eligibility["reasons"] else "Meets all primary invariants"
             )
 
+            ledger.record_entry(entry)
+
+            if eligibility["is_primary"]:
+                accepted += 1
+                metrics.record_approved(cluster="UNIFORM_CONTROL")
+                print(
+                    f"  [✓] ACCEPTED AS PRIMARY (CONTROL) [{accepted}/{num_samples}]: {problem_id} "
+                    f"(Diff: {diff:.2f}, AST: {dedup_res.ast_hash})"
+                )
+            else:
+                print(
+                    f"  [-] NON-PRIMARY / AUXILIARY ({entry.primary_eligibility_status}): {problem_id} "
+                    f"— Reason: {entry.primary_eligibility_reason}"
+                )
 
     # Flush metrics on completion
     metrics.flush(

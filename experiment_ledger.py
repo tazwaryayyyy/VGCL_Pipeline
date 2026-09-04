@@ -37,25 +37,30 @@ class LedgerEntry:
     generator_model: str = "gemini-3.6-flash"
     generator_version: str = "v1.0"
     prompt_hash: str = "hash0000"
-    target_failure_cluster: str = "FC_01_MICRO_CORRECTNESS"   # requested target (CLI argument)
+    target_failure_cluster: str = "FC_01_MICRO_CORRECTNESS"   # requested target (or UNIFORM_CONTROL)
     monotonic_queue_subtype: str = "Type A: sliding-window extrema"
 
-    # V6: Target attribution
-    # target_failure_cluster records the REQUESTED target (unchanged for backward compat).
-    # target_validation_status distinguishes whether the target is backed by real evidence:
-    #   VALIDATED    — real base-model failure evidence exists in target_evidence
-    #   UNVERIFIED   — no empirical evidence; label comes from CLI argument only
-    #   NOT_APPLICABLE — uniform control condition (no targeting)
+    # Target attribution
     target_validation_status: str = "UNVERIFIED"
     target_evidence: str = "{}"     # JSON string of ProbingResult.failure_evidence
     probe_result_hash: str = ""     # SHA-256[:16] of ProbingResult.to_dict() for cross-ref
 
-    # V6: Generator policy traceability
+    # Generator policy traceability (V7: explicit 2-pass tracking)
     generator_policy: str = "EXPERIMENTAL_GENERATOR_POLICY"
+    generator_model_pass1: str = "gemini-3.6-flash"
+    generator_model_pass2: str = "gemini-3.6-flash"
     fallback_used: bool = False
+    fallback_used_pass1: bool = False
+    fallback_used_pass2: bool = False
     fallback_reason: str = ""
+    fallback_reason_pass1: str = ""
+    fallback_reason_pass2: str = ""
 
-    # Difficulty  (real values from BaseModelProber in V6; mark historical V5 values as mocked)
+    # V7: Authoritative Primary Eligibility
+    primary_eligibility_status: str = "PENDING"  # PRIMARY_ELIGIBLE | AUXILIARY_NON_PRIMARY | QUARANTINED | REJECTED
+    primary_eligibility_reason: str = ""
+
+    # Difficulty (real values from BaseModelProber on frozen base model)
     base_pass1: float = 0.0
     base_pass10: float = 0.0
     empirical_difficulty: float = 1.0  # 1.0 - base_pass10
@@ -72,7 +77,7 @@ class LedgerEntry:
     similarity_score: float = 0.0
 
     # Acceptance
-    acceptance_reason: str = "Verified novel problem matching target failure cluster"
+    acceptance_reason: str = "Verified novel problem"
     reviewer_override: bool = False
     quarantine_reference: Optional[str] = None
 
@@ -87,11 +92,19 @@ class LedgerEntry:
 class ExperimentLedger:
     """Scientific Experiment Ledger supporting SQLite persistent storage and JSONL streaming."""
 
-    def __init__(self, db_path: str = "data/experiment_ledger.db", jsonl_path: str = "data/approved_curriculum.jsonl"):
+    def __init__(
+        self,
+        db_path: str = "data/experiment_ledger.db",
+        jsonl_path: str = "data/approved_curriculum.jsonl",
+        aux_jsonl_path: Optional[str] = None,
+    ):
         self.db_path = db_path
         self.jsonl_path = jsonl_path
+        self.aux_jsonl_path = aux_jsonl_path
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         os.makedirs(os.path.dirname(jsonl_path), exist_ok=True)
+        if self.aux_jsonl_path:
+            os.makedirs(os.path.dirname(self.aux_jsonl_path), exist_ok=True)
         self._init_sqlite()
 
     def _init_sqlite(self) -> None:
@@ -124,21 +137,28 @@ class ExperimentLedger:
                     spec TEXT
                 )
             """)
-            # V6 migration: add new columns if they do not exist (idempotent)
-            v6_columns = [
+            # V6 & V7 migration: add new columns if they do not exist (idempotent)
+            v7_columns = [
                 ("target_validation_status", "TEXT DEFAULT 'UNVERIFIED'"),
                 ("target_evidence", "TEXT DEFAULT '{}'"),
                 ("probe_result_hash", "TEXT DEFAULT ''"),
                 ("generator_policy", "TEXT DEFAULT 'EXPERIMENTAL_GENERATOR_POLICY'"),
+                ("generator_model_pass1", "TEXT DEFAULT 'gemini-3.6-flash'"),
+                ("generator_model_pass2", "TEXT DEFAULT 'gemini-3.6-flash'"),
                 ("fallback_used", "INTEGER DEFAULT 0"),
+                ("fallback_used_pass1", "INTEGER DEFAULT 0"),
+                ("fallback_used_pass2", "INTEGER DEFAULT 0"),
                 ("fallback_reason", "TEXT DEFAULT ''"),
+                ("fallback_reason_pass1", "TEXT DEFAULT ''"),
+                ("fallback_reason_pass2", "TEXT DEFAULT ''"),
+                ("primary_eligibility_status", "TEXT DEFAULT 'PENDING'"),
+                ("primary_eligibility_reason", "TEXT DEFAULT ''"),
             ]
             existing = {row[1] for row in cursor.execute("PRAGMA table_info(ledger)").fetchall()}
-            for col_name, col_def in v6_columns:
+            for col_name, col_def in v7_columns:
                 if col_name not in existing:
                     cursor.execute(f"ALTER TABLE ledger ADD COLUMN {col_name} {col_def}")
             conn.commit()
-
 
     def record_entry(self, entry: LedgerEntry) -> None:
         """Appends entry to both SQLite database and JSONL file immutably."""
@@ -152,9 +172,12 @@ class ExperimentLedger:
                     verification_status, ast_hash, cfg_hash, similarity_score, acceptance_reason,
                     reviewer_override, quarantine_reference, code_content, spec,
                     target_validation_status, target_evidence, probe_result_hash,
-                    generator_policy, fallback_used, fallback_reason
+                    generator_policy, generator_model_pass1, generator_model_pass2,
+                    fallback_used, fallback_used_pass1, fallback_used_pass2,
+                    fallback_reason, fallback_reason_pass1, fallback_reason_pass2,
+                    primary_eligibility_status, primary_eligibility_reason
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                          ?, ?, ?, ?, ?, ?)
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 entry.problem_id, entry.seed, entry.timestamp, entry.generator_model,
                 entry.generator_version, entry.prompt_hash, entry.target_failure_cluster,
@@ -168,15 +191,26 @@ class ExperimentLedger:
                 entry.target_evidence,
                 entry.probe_result_hash,
                 entry.generator_policy,
+                entry.generator_model_pass1,
+                entry.generator_model_pass2,
                 1 if entry.fallback_used else 0,
+                1 if entry.fallback_used_pass1 else 0,
+                1 if entry.fallback_used_pass2 else 0,
                 entry.fallback_reason,
+                entry.fallback_reason_pass1,
+                entry.fallback_reason_pass2,
+                entry.primary_eligibility_status,
+                entry.primary_eligibility_reason,
             ))
             conn.commit()
 
-        # Append to JSONL
-        with open(self.jsonl_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry.to_dict()) + "\n")
+        # Append to primary or auxiliary JSONL depending on eligibility
+        target_jsonl = self.jsonl_path
+        if entry.primary_eligibility_status != "PRIMARY_ELIGIBLE" and self.aux_jsonl_path:
+            target_jsonl = self.aux_jsonl_path
 
+        with open(target_jsonl, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry.to_dict()) + "\n")
 
     def get_entries(self, target_cluster: Optional[str] = None) -> List[Dict[str, Any]]:
         with sqlite3.connect(self.db_path) as conn:
@@ -186,6 +220,20 @@ class ExperimentLedger:
                 cursor.execute("SELECT * FROM ledger WHERE target_failure_cluster = ?", (target_cluster,))
             else:
                 cursor.execute("SELECT * FROM ledger")
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    def get_primary_entries(self, condition_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Returns only entries that satisfy PRIMARY_ELIGIBLE status."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            if condition_type == "TARGETED":
+                cursor.execute("SELECT * FROM ledger WHERE primary_eligibility_status = 'PRIMARY_ELIGIBLE' AND target_failure_cluster != 'UNIFORM_CONTROL'")
+            elif condition_type == "UNIFORM":
+                cursor.execute("SELECT * FROM ledger WHERE primary_eligibility_status = 'PRIMARY_ELIGIBLE' AND target_failure_cluster = 'UNIFORM_CONTROL'")
+            else:
+                cursor.execute("SELECT * FROM ledger WHERE primary_eligibility_status = 'PRIMARY_ELIGIBLE'")
             rows = cursor.fetchall()
             return [dict(r) for r in rows]
 
@@ -231,7 +279,7 @@ class ExperimentLedger:
         for e in entries:
             m = e.get("generator_model", "unknown")
             counts[m] = counts.get(m, 0) + 1
-            if m == primary_model:
+            if m == primary_model and not e.get("fallback_used"):
                 primary_count += 1
             else:
                 fallback_count += 1
@@ -246,25 +294,31 @@ class ExperimentLedger:
         }
 
     def get_target_validation_summary(self) -> Dict[str, Any]:
-        """V6: Audits what fraction of targeted entries have VALIDATED vs UNVERIFIED targets.
-
-        This is the primary scientific audit tool for target attribution integrity.
-        """
+        """V7: Audits primary eligibility and target validation integrity."""
         entries = self.get_entries()
-        counts: Dict[str, int] = {"VALIDATED": 0, "UNVERIFIED": 0, "NOT_APPLICABLE": 0, "UNKNOWN": 0}
+        val_counts: Dict[str, int] = {"VALIDATED": 0, "UNVERIFIED": 0, "NOT_APPLICABLE": 0, "UNKNOWN": 0}
+        elig_counts: Dict[str, int] = {"PRIMARY_ELIGIBLE": 0, "AUXILIARY_NON_PRIMARY": 0, "REJECTED": 0, "PENDING": 0}
         cluster_breakdown: Dict[str, Dict[str, int]] = {}
+
         for e in entries:
-            status = e.get("target_validation_status", "UNKNOWN")
+            val_status = e.get("target_validation_status", "UNKNOWN")
+            elig_status = e.get("primary_eligibility_status", "PENDING")
             cluster = e.get("target_failure_cluster", "UNKNOWN")
-            counts[status] = counts.get(status, 0) + 1
+
+            val_counts[val_status] = val_counts.get(val_status, 0) + 1
+            elig_counts[elig_status] = elig_counts.get(elig_status, 0) + 1
+
             if cluster not in cluster_breakdown:
                 cluster_breakdown[cluster] = {}
-            cluster_breakdown[cluster][status] = cluster_breakdown[cluster].get(status, 0) + 1
+            cluster_breakdown[cluster][val_status] = cluster_breakdown[cluster].get(val_status, 0) + 1
+
         total = len(entries)
         return {
             "total_entries": total,
-            "validation_counts": counts,
-            "validated_fraction": counts["VALIDATED"] / total if total > 0 else 0.0,
+            "validation_counts": val_counts,
+            "eligibility_counts": elig_counts,
+            "primary_eligible_count": elig_counts.get("PRIMARY_ELIGIBLE", 0),
+            "validated_fraction": val_counts.get("VALIDATED", 0) / total if total > 0 else 0.0,
             "cluster_breakdown": cluster_breakdown,
         }
 

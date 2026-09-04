@@ -73,13 +73,52 @@ SUBTYPES = [
 ]
 
 # ---------------------------------------------------------------------------
-# V6: Cluster → Subtype Compatibility Policy
+# V7: Deterministic Cluster Behavioral Profiles
+# ---------------------------------------------------------------------------
+# Provides observable execution failure characteristics for prompt guidance
+# without subjective interpretation or speculative reasoning.
+
+CLUSTER_BEHAVIOR_PROMPTS: Dict[str, str] = {
+    "FC_01_MICRO_CORRECTNESS": (
+        "Observable failure profile: Off-by-one errors, edge-case index handling, "
+        "or boundary condition mismatches on small-scale input domains."
+    ),
+    "FC_02_SCALE_DIVERGENCE": (
+        "Observable failure profile: Solution passes micro/small scale tests but suffers "
+        "time complexity blowup or quadratic scaling failures on large-scale instances."
+    ),
+    "FC_03_TERMINATION": (
+        "Observable failure profile: Infinite loops, unbounded recursion depth, "
+        "or iteration cycles failing termination contracts."
+    ),
+    "FC_04_BOUNDS_VIOLATION": (
+        "Observable failure profile: IndexError, KeyError, or out-of-bounds pointer traversal "
+        "when querying container elements."
+    ),
+    "FC_05_RESOURCE_FAILURE": (
+        "Observable failure profile: Memory limit exceedance or excessive auxiliary space "
+        "allocation exceeding system resource caps."
+    ),
+    "FC_06_FORMAT_CONTRACT": (
+        "Observable failure profile: Return type mismatch, malformed output shape, "
+        "or failure to meet the declared function signature specification."
+    ),
+    "FC_07_STATE_INCONSISTENCY": (
+        "Observable failure profile: Unintended in-place mutation of input arguments or "
+        "state corruption across successive query executions."
+    ),
+    "FC_08_UNKNOWN": (
+        "Observable failure profile: General unclassified deterministic execution divergence."
+    ),
+}
+
+# ---------------------------------------------------------------------------
+# V6/V7: Cluster → Subtype Compatibility Policy
 # ---------------------------------------------------------------------------
 # This mapping is the SINGLE source of truth for which subtypes are compatible
-# with which failure clusters.  SubtypeScheduler.select() enforces this list
+# with which failure clusters. SubtypeScheduler.select() enforces this list
 # at call time; requesting a subtype outside a cluster's allowed set raises
-# ValueError (fail-closed).  Any change to this mapping is a policy change
-# and must be reflected in docs/EXPERIMENT_FREEZE.md.
+# ValueError (fail-closed).
 #
 # Rationale:
 #   FC_01 (micro-correctness)   → boundary/edge-case subtypes A, B, D, F
@@ -414,14 +453,14 @@ def generate_targeted_candidate(
     subtype: str,
     seed: int,
     metrics: Optional[PipelineMetrics] = None,
-) -> Tuple[bool, Dict[str, str], str, float, int, bool, str]:
+) -> Tuple[bool, Dict[str, str], str, str, float, int, bool, bool, str, str]:
     """
     Decoupled 2-Pass Generation Pipeline (Oracle Independence - Invariant III).
     Pass 1: Generate PROBLEM_SPEC, SOLVE_OPTIMIZED, and TEST_GENERATOR.
     Pass 2: Isolated call receiving ONLY PROBLEM_SPEC to write naive/brute-force SOLVE_BRUTE.
 
     Returns:
-        (ok, blocks, model_name, latency, api_calls, fallback_used, fallback_reason)
+        (ok, blocks, model1, model2, latency, api_calls, fb1, fb2, fb_reason1, fb_reason2)
     """
     cluster_desc = CLUSTER_BEHAVIOR_PROMPTS.get(cluster_id, f"Target Cluster: {cluster_id}")
 
@@ -456,7 +495,7 @@ def generate_targeted_candidate(
     test_gen = parse_block_content(raw_p1, "### TEST_GENERATOR")
 
     if not spec or not solve_opt or not test_gen:
-        return False, {}, model1, lat1, ret1, fb1, fb_reason1
+        return False, {}, model1, "", lat1, ret1, fb1, False, fb_reason1, ""
 
     # Pass 2: Isolated Reference Implementation (Oracle Independence)
     system_pass2 = (
@@ -478,7 +517,7 @@ def generate_targeted_candidate(
     solve_brute = parse_block_content(raw_p2, "### SOLVE_BRUTE")
 
     if not solve_brute:
-        return False, {}, model2, lat1 + lat2, ret1 + ret2, fb1 or fb2, fb_reason2 or fb_reason1
+        return False, {}, model1, model2, lat1 + lat2, ret1 + ret2, fb1, fb2, fb_reason1, fb_reason2
 
     blocks = {
         "spec": spec,
@@ -486,15 +525,12 @@ def generate_targeted_candidate(
         "solve_brute": solve_brute,
         "test_gen": test_gen,
     }
-    fallback_used = fb1 or fb2
-    fallback_reason = fb_reason2 if fb2 else (fb_reason1 if fb1 else "")
-    return True, blocks, model1, lat1 + lat2, ret1 + ret2, fallback_used, fallback_reason
+    return True, blocks, model1, model2, lat1 + lat2, ret1 + ret2, fb1, fb2, fb_reason1, fb_reason2
 
 
 # ---------------------------------------------------------------------------
-# V6: BaseModelProber (session-scoped singleton)
+# V6/V7: BaseModelProber (session-scoped singleton)
 # ---------------------------------------------------------------------------
-# Instantiated once per pipeline run.  Model loading is lazy (on first probe).
 _base_model_prober: Optional[BaseModelProber] = None
 
 
@@ -505,34 +541,41 @@ def _get_prober() -> BaseModelProber:
     return _base_model_prober
 
 
-
 def run_targeted_generation_pipeline(
     target_cluster: str,
     num_samples: int = 5,
     max_imbalance_ratio: float = 0.40,
     batch_size: int = 1,
+    db_path: str = "data/v7_experiment_ledger.db",
+    jsonl_path: str = "data/v7_approved_curriculum.jsonl",
+    aux_jsonl_path: str = "data/v7_auxiliary_curriculum.jsonl",
     metrics: Optional[PipelineMetrics] = None,
 ) -> None:
     """
-    Failure-targeted curriculum generation loop.
+    Failure-targeted curriculum generation loop with strict V7 primary eligibility gating.
 
     Args:
         target_cluster:      Failure cluster ID (e.g. ``"FC_01_MICRO_CORRECTNESS"``).
-        num_samples:         Number of verified, deduplicated samples to accept.
+        num_samples:         Number of verified, deduplicated, VALIDATED primary samples to accept.
         max_imbalance_ratio: Subtype imbalance ratio threshold for logging.
-        batch_size:          Number of parallel generation calls per outer
-                             iteration.  Default ``1`` runs without generation
-                             concurrency.
-        metrics:             Optional ``PipelineMetrics`` instance.  When
-                             ``None``, a private run-scoped collector is used.
+        batch_size:          Number of parallel generation calls per outer iteration.
+        db_path:             SQLite ledger path.
+        jsonl_path:          Primary approved curriculum JSONL path.
+        aux_jsonl_path:      Auxiliary/non-primary curriculum JSONL path.
+        metrics:             Optional PipelineMetrics instance.
     """
+    from quality_gates import check_primary_targeted_eligibility
+
     print(f"=== STARTING TARGETED CURRICULUM GENERATION FOR CLUSTER: {target_cluster} ===")
     manifest = create_generation_manifest(output_path="data/generation_manifest.json")
-    print(f"  [MANIFEST] Frozen manifest recorded (Freeze: {manifest.get('freeze_tag')}, Primary Model: {manifest.get('generator_model')})")
+    print(
+        f"  [MANIFEST] Frozen manifest recorded (Freeze: {manifest.get('freeze_tag')}, "
+        f"Primary Model: {manifest.get('generator_model')})"
+    )
 
     oracle = VerificationOracle()
     dedup = StructuralDeduplicationEngine(similarity_threshold=0.70)
-    ledger = ExperimentLedger()
+    ledger = ExperimentLedger(db_path=db_path, jsonl_path=jsonl_path, aux_jsonl_path=aux_jsonl_path)
     scheduler = SubtypeScheduler(subtypes=SUBTYPES)
 
     if metrics is None:
@@ -552,7 +595,7 @@ def run_targeted_generation_pipeline(
             subtype = scheduler.select(ledger_dist=planned_dist, seed=b_seed, cluster_id=target_cluster)
 
             if total_in_cluster > 6:
-                max_count = max(dist.values()) if dist else 0
+                max_count = max(planned_dist.values()) if planned_dist else 0
                 if (max_count / total_in_cluster) > max_imbalance_ratio:
                     print(
                         f"  [-] Subtype imbalance detected ({max_count}/{total_in_cluster}). "
@@ -566,15 +609,15 @@ def run_targeted_generation_pipeline(
             cluster_id: str,
             subtype: str,
             b_seed: int,
-        ) -> Tuple[int, str, bool, Dict[str, str], str, float, int, bool, str]:
+        ) -> Tuple[int, str, bool, Dict[str, str], str, str, float, int, bool, bool, str, str]:
             """Worker thunk executed in the thread pool."""
-            ok, blocks, model_name, latency, retries, fallback_used, fallback_reason = generate_targeted_candidate(
+            ok, blocks, m1, m2, latency, retries, fb1, fb2, fb_r1, fb_r2 = generate_targeted_candidate(
                 cluster_id=cluster_id,
                 subtype=subtype,
                 seed=b_seed,
                 metrics=metrics,
             )
-            return b_seed, subtype, ok, blocks, model_name, latency, retries, fallback_used, fallback_reason
+            return b_seed, subtype, ok, blocks, m1, m2, latency, retries, fb1, fb2, fb_r1, fb_r2
 
         effective_batch = min(batch_size, num_samples - accepted)
         futures_map = {}
@@ -594,7 +637,7 @@ def run_targeted_generation_pipeline(
                 try:
                     result = fut.result()
                 except Exception as exc:
-                    result = (b_seed, subtype, False, {}, "failed", 0.0, 0, False, "")
+                    result = (b_seed, subtype, False, {}, "failed", "failed", 0.0, 0, False, False, "", "")
                     print(f"  [X] Batch worker exception (seed {b_seed}): {exc}")
                 results_by_seed[b_seed] = result
 
@@ -602,12 +645,17 @@ def run_targeted_generation_pipeline(
             if accepted >= num_samples:
                 break
 
-            b_seed_val, subtype, ok, blocks, model_name, latency, api_calls, gen_fallback_used, gen_fallback_reason = results_by_seed[b_seed]
+            b_seed_val, subtype, ok, blocks, m1, m2, latency, api_calls, fb1, fb2, fb_r1, fb_r2 = results_by_seed[b_seed]
 
             metrics.record_attempt(subtype=subtype, cluster=target_cluster)
             metrics.record_gen_latency(latency)
             metrics.record_initial_generation_api_calls(api_calls)
-            metrics.record_model_serving(model_name)
+            metrics.record_model_serving(m1)
+
+            gen_fallback_used = fb1 or fb2
+            gen_fallback_reason = f"Pass1: {fb_r1} | Pass2: {fb_r2}".strip(" |") if gen_fallback_used else ""
+            primary_model_name = EXPERIMENTAL_GENERATOR_POLICY["primary_model"]
+            effective_model = primary_model_name if not gen_fallback_used else (f"{m1}+{m2}" if m1 != m2 else m1)
 
             if gen_fallback_used:
                 print(
@@ -664,7 +712,7 @@ def run_targeted_generation_pipeline(
                     oracle.quarantine(
                         seed=b_seed_val,
                         prompt_hash=prompt_hash,
-                        generator_model=model_name,
+                        generator_model=effective_model,
                         generator_version="v1.0",
                         optimized_code=blocks.get("solve_opt", ""),
                         reference_code=blocks.get("solve_brute", ""),
@@ -688,7 +736,7 @@ def run_targeted_generation_pipeline(
                 oracle.quarantine(
                     seed=b_seed_val,
                     prompt_hash=prompt_hash,
-                    generator_model=model_name,
+                    generator_model=effective_model,
                     generator_version="v1.0",
                     optimized_code=blocks.get("solve_opt", ""),
                     reference_code=blocks.get("solve_brute", ""),
@@ -707,7 +755,7 @@ def run_targeted_generation_pipeline(
                 oracle.quarantine(
                     seed=b_seed_val,
                     prompt_hash=prompt_hash,
-                    generator_model=model_name,
+                    generator_model=effective_model,
                     generator_version="v1.0",
                     optimized_code=blocks.get("solve_opt", ""),
                     reference_code=blocks.get("solve_brute", ""),
@@ -726,7 +774,7 @@ def run_targeted_generation_pipeline(
                 full_code=full_code,
                 seed=b_seed_val,
                 prompt_hash=prompt_hash,
-                generator_model=model_name,
+                generator_model=effective_model,
                 solve_opt=blocks["solve_opt"],
                 solve_brute=blocks["solve_brute"],
                 test_gen=blocks["test_gen"],
@@ -765,7 +813,7 @@ def run_targeted_generation_pipeline(
                 scheduler.record_outcome(subtype, approved=False)
                 continue
 
-            # 5. Real Base-Model Probing (V6 — replaces PRNG calibration)
+            # 5. Real Base-Model Probing (V7: Execution against Qwen base model)
             prober = _get_prober()
             probe_result = prober.probe(
                 problem_id=problem_id,
@@ -784,35 +832,37 @@ def run_targeted_generation_pipeline(
             probe_hash = _hl.sha256(probe_dict_json.encode()).hexdigest()[:16]
 
             # Determine target validation status
-            # If the probe's observed failure cluster matches the requested target,
-            # the target is VALIDATED; otherwise it is UNVERIFIED.
             target_validation_status: str
             if probe_result.failure_cluster_id == target_cluster:
                 target_validation_status = "VALIDATED"
-            elif probe_result.failure_cluster_id is None and diff == 0.0:
-                # Model passed all probes — no failure observed → target not refuted but not confirmed
-                target_validation_status = "UNVERIFIED"
             else:
                 target_validation_status = "UNVERIFIED"
 
             target_evidence_json = _js.dumps(probe_result.failure_evidence)
 
+            # 6. Construct Ledger Entry
             entry = LedgerEntry(
                 problem_id=problem_id,
                 seed=b_seed_val,
-                generator_model=model_name,
+                generator_model=effective_model,
                 generator_version="v1.0",
                 prompt_hash=prompt_hash,
                 target_failure_cluster=target_cluster,
                 monotonic_queue_subtype=subtype,
-                # V6 targeting fields
+                # Targeting fields
                 target_validation_status=target_validation_status,
                 target_evidence=target_evidence_json,
                 probe_result_hash=probe_hash,
-                # V6 generator policy fields
+                # Generator policy fields
                 generator_policy="EXPERIMENTAL_GENERATOR_POLICY",
+                generator_model_pass1=m1,
+                generator_model_pass2=m2,
                 fallback_used=gen_fallback_used,
+                fallback_used_pass1=fb1,
+                fallback_used_pass2=fb2,
                 fallback_reason=gen_fallback_reason,
+                fallback_reason_pass1=fb_r1,
+                fallback_reason_pass2=fb_r2,
                 # Difficulty from real probe
                 base_pass1=pass1,
                 base_pass10=pass10,
@@ -824,19 +874,36 @@ def run_targeted_generation_pipeline(
                 ast_hash=dedup_res.ast_hash,
                 cfg_hash=dedup_res.cfg_hash,
                 similarity_score=dedup_res.similarity_score,
-                acceptance_reason=f"Approved targeted candidate for {target_cluster} [target_validation={target_validation_status}]",
+                acceptance_reason=f"Approved candidate for {target_cluster} [target_validation={target_validation_status}]",
                 code_content=full_code,
                 spec=blocks["spec"],
             )
-            ledger.record_entry(entry)
-            accepted += 1
-            metrics.record_approved(subtype=subtype, cluster=target_cluster)
-            scheduler.record_outcome(subtype, approved=True)
-            print(
-                f"  [\u2713] ACCEPTED & RECORDED: {problem_id} "
-                f"(Diff: {diff:.2f}, AST: {dedup_res.ast_hash}, "
-                f"TargetValidation: {target_validation_status})"
+
+            # 7. V7 Authoritative Primary Eligibility Gate
+            eligibility = check_primary_targeted_eligibility(entry)
+            entry.primary_eligibility_status = eligibility["status"]
+            entry.primary_eligibility_reason = (
+                "; ".join(eligibility["reasons"]) if eligibility["reasons"] else "Meets all primary invariants"
             )
+
+            # Record entry immutably in ledger (SQLite + appropriate JSONL)
+            ledger.record_entry(entry)
+
+            if eligibility["is_primary"]:
+                accepted += 1
+                metrics.record_approved(subtype=subtype, cluster=target_cluster)
+                scheduler.record_outcome(subtype, approved=True)
+                print(
+                    f"  [✓] ACCEPTED AS PRIMARY [{accepted}/{num_samples}]: {problem_id} "
+                    f"(Diff: {diff:.2f}, AST: {dedup_res.ast_hash}, "
+                    f"TargetValidation: {target_validation_status})"
+                )
+            else:
+                scheduler.record_outcome(subtype, approved=False)
+                print(
+                    f"  [-] NON-PRIMARY / AUXILIARY ({entry.primary_eligibility_status}): {problem_id} "
+                    f"— Reason: {entry.primary_eligibility_reason}"
+                )
 
     metrics.flush(
         json_path="data/metrics_targeted.json",

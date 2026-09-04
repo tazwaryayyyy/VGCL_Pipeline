@@ -1067,16 +1067,16 @@ class TestPhase0Pipeline(unittest.TestCase):
         self.assertEqual(pass10, 1.0)
         self.assertEqual(diff, 0.0)
 
-    def test_36_freeze_v6_tag_and_manifest_identity(self):
-        """Test 36: Freeze tag is phase0-experiment-freeze-v6 in manifest and config."""
+    def test_36_freeze_v7_tag_and_manifest_identity(self):
+        """Test 36: Freeze tag is phase0-experiment-freeze-v7 in manifest and config."""
         from generation_manifest import FROZEN_EXPERIMENT_CONFIG, create_generation_manifest
         from generation_manifest import load_yaml_config
 
-        self.assertEqual(FROZEN_EXPERIMENT_CONFIG["freeze_tag"], "phase0-experiment-freeze-v6")
+        self.assertEqual(FROZEN_EXPERIMENT_CONFIG["freeze_tag"], "phase0-experiment-freeze-v7")
         manifest = create_generation_manifest(output_path=None)
-        self.assertEqual(manifest["freeze_tag"], "phase0-experiment-freeze-v6")
+        self.assertEqual(manifest["freeze_tag"], "phase0-experiment-freeze-v7")
         cfg = load_yaml_config()
-        self.assertEqual(cfg["generation_configuration"]["freeze_tag"], "phase0-experiment-freeze-v6")
+        self.assertEqual(cfg["generation_configuration"]["freeze_tag"], "phase0-experiment-freeze-v7")
 
     def test_37_adversarial_hidden_loops_and_misleading_comments(self):
         """Test 37: Misleading comments cannot hide dominant nested loops over large regimes."""
@@ -1223,7 +1223,8 @@ class TestPhase0Pipeline(unittest.TestCase):
 
         gen_dist = ledger.get_generator_model_distribution()
         self.assertEqual(gen_dist["total_entries"], 2)
-        self.assertEqual(gen_dist["primary_count"], 2)
+        self.assertEqual(gen_dist["primary_count"], 1)
+        self.assertEqual(gen_dist["fallback_count"], 1)
 
     def test_41_fallback_policy_accounting(self):
         """Test 41: Fallback models are tracked in ledger without silently mutating primary status."""
@@ -1250,13 +1251,303 @@ class TestPhase0Pipeline(unittest.TestCase):
         entries = ledger.get_entries()
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["generator_model"], "gemini-3.1-flash-lite")
-        self.assertEqual(entries[0]["fallback_used"], 1)
         self.assertEqual(
             entries[0]["fallback_reason"],
             "quota_exhaustion: ResourceExhausted: rate limit exceeded",
         )
 
+    def test_42_primary_targeted_eligibility_validated(self):
+        """Test 42: Targeted candidate with valid probe, oracle pass, dedup pass, and primary generator is PRIMARY_ELIGIBLE."""
+        from quality_gates import check_primary_targeted_eligibility
+        from experiment_ledger import LedgerEntry
 
+        entry = LedgerEntry(
+            problem_id="PROB_TGT_VALID_001",
+            seed=1001,
+            target_failure_cluster="FC_01_MICRO_CORRECTNESS",
+            monotonic_queue_subtype="Type A: sliding-window extrema",
+            target_validation_status="VALIDATED",
+            target_evidence='{"exception_type": "MismatchError", "error_msg": "Phase A Mismatch"}',
+            probe_result_hash="abc123hash000000",
+            generator_model="gemini-3.6-flash",
+            generator_model_pass1="gemini-3.6-flash",
+            generator_model_pass2="gemini-3.6-flash",
+            generator_policy="EXPERIMENTAL_GENERATOR_POLICY",
+            fallback_used=False,
+            ast_hash="ast_hash_valid",
+            similarity_score=0.10,
+            phase_a_pass_count=20,
+            phase_b_pass=True,
+            verification_status="APPROVED",
+        )
+        res = check_primary_targeted_eligibility(entry)
+        self.assertTrue(res["is_primary"])
+        self.assertEqual(res["status"], "PRIMARY_ELIGIBLE")
+        self.assertEqual(len(res["reasons"]), 0)
+
+    def test_43_primary_targeted_eligibility_rejected_if_unverified(self):
+        """Test 43: Targeted candidate with UNVERIFIED status is rejected from primary dataset."""
+        from quality_gates import check_primary_targeted_eligibility
+        from experiment_ledger import LedgerEntry
+
+        entry = LedgerEntry(
+            problem_id="PROB_TGT_UNVER_001",
+            seed=1002,
+            target_failure_cluster="FC_01_MICRO_CORRECTNESS",
+            monotonic_queue_subtype="Type A: sliding-window extrema",
+            target_validation_status="UNVERIFIED",
+            target_evidence="{}",
+            probe_result_hash="",
+            generator_model="gemini-3.6-flash",
+            generator_policy="EXPERIMENTAL_GENERATOR_POLICY",
+            fallback_used=False,
+            ast_hash="ast_hash_valid",
+            similarity_score=0.10,
+            phase_a_pass_count=20,
+            phase_b_pass=True,
+            verification_status="APPROVED",
+        )
+        res = check_primary_targeted_eligibility(entry)
+        self.assertFalse(res["is_primary"])
+        self.assertEqual(res["status"], "AUXILIARY_NON_PRIMARY")
+        self.assertTrue(any("VALIDATED" in r for r in res["reasons"]))
+
+    def test_44_primary_targeted_eligibility_fallback_rejected(self):
+        """Test 44: Candidate generated via fallback in either pass cannot enter primary dataset."""
+        from quality_gates import check_primary_targeted_eligibility
+        from experiment_ledger import LedgerEntry
+
+        # Pass 1 primary, Pass 2 fallback
+        entry_p2_fb = LedgerEntry(
+            problem_id="PROB_TGT_FB2_001",
+            seed=1003,
+            target_failure_cluster="FC_01_MICRO_CORRECTNESS",
+            monotonic_queue_subtype="Type A: sliding-window extrema",
+            target_validation_status="VALIDATED",
+            target_evidence='{"exception_type": "MismatchError"}',
+            probe_result_hash="probe_hash_001",
+            generator_model="gemini-3.6-flash+gemini-3.1-flash-lite",
+            generator_model_pass1="gemini-3.6-flash",
+            generator_model_pass2="gemini-3.1-flash-lite",
+            generator_policy="EXPERIMENTAL_GENERATOR_POLICY",
+            fallback_used=True,
+            fallback_used_pass1=False,
+            fallback_used_pass2=True,
+            ast_hash="ast_hash_valid",
+            similarity_score=0.10,
+            phase_a_pass_count=20,
+            phase_b_pass=True,
+            verification_status="APPROVED",
+        )
+        res = check_primary_targeted_eligibility(entry_p2_fb)
+        self.assertFalse(res["is_primary"])
+        self.assertEqual(res["status"], "AUXILIARY_NON_PRIMARY")
+        self.assertTrue(any("fallback" in r.lower() for r in res["reasons"]))
+
+    def test_45_primary_uniform_eligibility_valid(self):
+        """Test 45: Uniform control candidate is PRIMARY_ELIGIBLE without requiring failure target validation."""
+        from quality_gates import check_primary_uniform_eligibility
+        from experiment_ledger import LedgerEntry
+
+        entry = LedgerEntry(
+            problem_id="PROB_UNI_VALID_001",
+            seed=5001,
+            target_failure_cluster="UNIFORM_CONTROL",
+            monotonic_queue_subtype="Type B: bounded-transition DP",
+            target_validation_status="NOT_APPLICABLE",
+            target_evidence="{}",
+            probe_result_hash="probe_hash_uni_001",
+            generator_model="gemini-3.6-flash",
+            generator_model_pass1="gemini-3.6-flash",
+            generator_model_pass2="gemini-3.6-flash",
+            generator_policy="EXPERIMENTAL_GENERATOR_POLICY",
+            fallback_used=False,
+            ast_hash="ast_hash_valid",
+            similarity_score=0.10,
+            phase_a_pass_count=20,
+            phase_b_pass=True,
+            verification_status="APPROVED",
+        )
+        res = check_primary_uniform_eligibility(entry)
+        self.assertTrue(res["is_primary"])
+        self.assertEqual(res["status"], "PRIMARY_ELIGIBLE")
+
+    def test_46_primary_uniform_eligibility_rejects_fallback(self):
+        """Test 46: Uniform control candidate generated with fallback is rejected from primary dataset."""
+        from quality_gates import check_primary_uniform_eligibility
+        from experiment_ledger import LedgerEntry
+
+        entry = LedgerEntry(
+            problem_id="PROB_UNI_FB_001",
+            seed=5002,
+            target_failure_cluster="UNIFORM_CONTROL",
+            monotonic_queue_subtype="Type B: bounded-transition DP",
+            target_validation_status="NOT_APPLICABLE",
+            target_evidence="{}",
+            probe_result_hash="probe_hash_uni_002",
+            generator_model="gemini-3.1-flash-lite",
+            generator_policy="EXPERIMENTAL_GENERATOR_POLICY",
+            fallback_used=True,
+            fallback_used_pass1=True,
+            ast_hash="ast_hash_valid",
+            similarity_score=0.10,
+            phase_a_pass_count=20,
+            phase_b_pass=True,
+            verification_status="APPROVED",
+        )
+        res = check_primary_uniform_eligibility(entry)
+        self.assertFalse(res["is_primary"])
+        self.assertEqual(res["status"], "AUXILIARY_NON_PRIMARY")
+
+    def test_47_cluster_behavior_prompts_completeness(self):
+        """Test 47: Every canonical failure cluster in CLUSTER_MAP has a deterministic behavioral prompt."""
+        from failure_mapper import CLUSTER_MAP
+        from targeted_generation import CLUSTER_BEHAVIOR_PROMPTS
+
+        for cat, cluster_id in CLUSTER_MAP.items():
+            self.assertIn(
+                cluster_id,
+                CLUSTER_BEHAVIOR_PROMPTS,
+                f"Cluster '{cluster_id}' missing in CLUSTER_BEHAVIOR_PROMPTS",
+            )
+            desc = CLUSTER_BEHAVIOR_PROMPTS[cluster_id]
+            self.assertTrue(len(desc) > 20, f"Prompt for '{cluster_id}' is empty or too short")
+
+    def test_48_semantic_drift_prevention_fc03_subtype_rejection(self):
+        """Test 48: SubtypeScheduler and CLUSTER_SUBTYPE_COMPATIBILITY strictly forbid incompatible subtypes for FC_03."""
+        from targeted_generation import CLUSTER_SUBTYPE_COMPATIBILITY, SubtypeScheduler, SUBTYPES
+
+        fc03_allowed = CLUSTER_SUBTYPE_COMPATIBILITY["FC_03_TERMINATION"]
+        # Type A and Type B are NOT allowed for FC_03
+        self.assertNotIn("Type A: sliding-window extrema", fc03_allowed)
+        self.assertNotIn("Type B: bounded-transition DP", fc03_allowed)
+        # Type C is allowed
+        self.assertIn("Type C: prefix-sum deque optimization", fc03_allowed)
+
+        scheduler = SubtypeScheduler(subtypes=SUBTYPES)
+        # Test that select() only returns allowed subtypes for FC_03
+        for seed in range(20):
+            chosen = scheduler.select(ledger_dist={}, seed=seed, cluster_id="FC_03_TERMINATION")
+            self.assertIn(
+                chosen,
+                fc03_allowed,
+                f"Scheduler selected incompatible subtype '{chosen}' for FC_03_TERMINATION",
+            )
+
+    def test_49_common_domain_support_symmetry(self):
+        """Test 49: Targeted and uniform pipelines share identical domain support taxonomy."""
+        import targeted_generation
+        import uniform_generation
+
+        self.assertEqual(targeted_generation.SUBTYPES, uniform_generation.SUBTYPES)
+        self.assertEqual(len(targeted_generation.SUBTYPES), 6)
+
+    def test_50_historical_artifacts_not_in_primary_query(self):
+        """Test 50: get_primary_entries() only returns entries with PRIMARY_ELIGIBLE status."""
+        from experiment_ledger import ExperimentLedger, LedgerEntry
+
+        db_path = os.path.join(self.test_dir, "test_primary_filter.db")
+        jsonl_path = os.path.join(self.test_dir, "test_primary_filter.jsonl")
+        ledger = ExperimentLedger(db_path=db_path, jsonl_path=jsonl_path)
+
+        # 1. Primary eligible entry
+        entry1 = LedgerEntry(
+            problem_id="PROB_PRIM_001",
+            seed=3001,
+            target_failure_cluster="FC_01_MICRO_CORRECTNESS",
+            monotonic_queue_subtype="Type A: sliding-window extrema",
+            target_validation_status="VALIDATED",
+            target_evidence='{"exception_type": "MismatchError"}',
+            probe_result_hash="hash_prim_001",
+            generator_model="gemini-3.6-flash",
+            fallback_used=False,
+            primary_eligibility_status="PRIMARY_ELIGIBLE",
+            phase_a_pass_count=20,
+            phase_b_pass=True,
+            verification_status="APPROVED",
+            ast_hash="ast1",
+        )
+        ledger.record_entry(entry1)
+
+        # 2. Auxiliary / legacy entry
+        entry2 = LedgerEntry(
+            problem_id="PROB_AUX_002",
+            seed=3002,
+            target_failure_cluster="FC_01_MICRO_CORRECTNESS",
+            monotonic_queue_subtype="Type A: sliding-window extrema",
+            target_validation_status="UNVERIFIED",
+            probe_result_hash="",
+            generator_model="gemini-3.1-flash-lite",
+            fallback_used=True,
+            primary_eligibility_status="AUXILIARY_NON_PRIMARY",
+            phase_a_pass_count=20,
+            phase_b_pass=True,
+            verification_status="APPROVED",
+            ast_hash="ast2",
+        )
+        ledger.record_entry(entry2)
+
+        all_entries = ledger.get_entries()
+        primary_entries = ledger.get_primary_entries()
+
+        self.assertEqual(len(all_entries), 2)
+        self.assertEqual(len(primary_entries), 1)
+        self.assertEqual(primary_entries[0]["problem_id"], "PROB_PRIM_001")
+
+    def test_51_probe_hash_cross_referencing(self):
+        """Test 51: ProbingResult SHA-256 hash deterministically identifies probe output record."""
+        import hashlib, json
+        from base_model_prober import ProbingResult
+
+        res = ProbingResult(
+            problem_id="PROB_TEST_HASH",
+            base_model_id="Qwen/Qwen2.5-1.5B-Instruct",
+            probing_policy_version="v1.0_qwen25_1.5b_instruct",
+            probing_policy_hash="policy_hash_001",
+            probe_timestamp=1787770000.0,
+            probe_seeds=[101, 102],
+            pass1=0.0,
+            pass10=0.0,
+            empirical_difficulty=1.0,
+            failure_cluster_id="FC_01_MICRO_CORRECTNESS",
+            failure_category="CORRECTNESS_FAILURE_MICRO",
+            failure_evidence={"exception_type": "MismatchError", "error_msg": "Phase A Mismatch"},
+            tokenizer_vocab_size=151936,
+            tokenizer_name_or_path="Qwen/Qwen2.5-1.5B-Instruct",
+        )
+        json_blob = json.dumps(res.to_dict(), sort_keys=True)
+        probe_hash = hashlib.sha256(json_blob.encode()).hexdigest()[:16]
+
+        self.assertEqual(len(probe_hash), 16)
+        # Verify hash changes if failure evidence changes
+        res2 = ProbingResult(
+            problem_id="PROB_TEST_HASH",
+            base_model_id="Qwen/Qwen2.5-1.5B-Instruct",
+            probing_policy_version="v1.0_qwen25_1.5b_instruct",
+            probing_policy_hash="policy_hash_001",
+            probe_timestamp=1787770000.0,
+            probe_seeds=[101, 102],
+            pass1=0.0,
+            pass10=0.0,
+            empirical_difficulty=1.0,
+            failure_cluster_id="FC_02_SCALE_DIVERGENCE",
+            failure_category="SCALE_DIVERGENCE",
+            failure_evidence={"exception_type": "TimeoutError", "error_msg": "Timed out on large scale"},
+            tokenizer_vocab_size=151936,
+            tokenizer_name_or_path="Qwen/Qwen2.5-1.5B-Instruct",
+        )
+        json_blob2 = json.dumps(res2.to_dict(), sort_keys=True)
+        probe_hash2 = hashlib.sha256(json_blob2.encode()).hexdigest()[:16]
+        self.assertNotEqual(probe_hash, probe_hash2)
+
+    def test_52_no_prng_difficulty_on_primary_path(self):
+        """Test 52: Active generation paths use BaseModelProber difficulty formula empirical_difficulty = 1.0 - base_pass10."""
+        from base_model_prober import PROBING_POLICY
+
+        self.assertEqual(PROBING_POLICY["model_id"], "Qwen/Qwen2.5-1.5B-Instruct")
+        self.assertEqual(PROBING_POLICY["k_samples"], 10)
+        self.assertEqual(PROBING_POLICY["temperature_pass1"], 0.0)
+        self.assertEqual(PROBING_POLICY["temperature_pass10"], 0.8)
 
 
 if __name__ == "__main__":

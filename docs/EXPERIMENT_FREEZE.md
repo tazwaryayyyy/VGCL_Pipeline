@@ -312,6 +312,57 @@ Test Status:
 py_compile: passed for all modules including `base_model_prober.py`.
 git diff --check: passed.
 
-Repository status:
-Frozen for Phase 0 curriculum generation and statistical evaluation under V6.
+# Freeze Revision: phase0-experiment-freeze-v7 (FINAL)
 
+Freeze version:
+phase0-experiment-freeze-v7
+
+Previous freeze:
+phase0-experiment-freeze-v6
+
+Reason for revision:
+Final pre-experiment scientific repair, primary dataset eligibility gating, and control symmetry alignment:
+1. Authoritative Primary Eligibility Gate (`quality_gates.py`):
+   - Implemented `check_primary_targeted_eligibility` and `check_primary_uniform_eligibility` as the single source of truth.
+   - Distinguishes `PRIMARY_ELIGIBLE` from `AUXILIARY_NON_PRIMARY` and `REJECTED`.
+   - Invariant: Only candidates produced by the frozen primary generator model (`gemini-3.6-flash`) across both decoupled passes without fallback, verified by oracle, non-duplicate, subtype-valid, and (for targeted) possessing confirmed empirical base-model failure attribution (`target_validation_status == "VALIDATED"`) are accepted into the primary curriculum.
+2. Control Condition Scientific Symmetry (`uniform_generation.py`):
+   - Aligned uniform control to sample from the identical common support domain (Types A–F Monotonic Queue / Deque structures) without receiving failure target cluster metadata.
+   - Uniform control does NOT require base-model target failure validation, preserving true control condition causality: same support, same machinery, same budget, same generator policy; different targeting signal.
+3. Generator Fallback Isolation & Anti-Contamination:
+   - Decoupled two-pass model tracking (`generator_model_pass1`, `generator_model_pass2`, `fallback_used_pass1`, `fallback_used_pass2`, `fallback_reason_pass1`, `fallback_reason_pass2`).
+   - If fallback occurs in either pass, candidate is immutably routed to auxiliary datasets (`data/v7_auxiliary_curriculum.jsonl`, `data/v7_uniform_auxiliary_curriculum.jsonl`) and does not count towards the primary curriculum sample budget.
+4. Deterministic Behavioral Profiles (`CLUSTER_BEHAVIOR_PROMPTS`):
+   - Added deterministic observable failure descriptions for all 8 clusters in `targeted_generation.py`.
+5. Dataset Namespaces & Historical Immutability:
+   - Historical V5/V6 data preserved. Primary experimental runs write exclusively to V7 namespaces (`v7_approved_curriculum.jsonl`, `v7_experiment_ledger.db`, `v7_uniform_approved_curriculum.jsonl`, `v7_uniform_experiment_ledger.db`).
+
+Date:
+2026-08-30
+
+Base model:
+Qwen/Qwen2.5-1.5B-Instruct
+
+Generator model policy:
+Primary: gemini-3.6-flash
+Fallback sequence: [gemini-3.1-flash-lite, gemini-3.5-flash-lite, gemini-flash-latest]
+Policy declaration: EXPERIMENTAL_GENERATOR_POLICY
+
+Quality Gates & Verification:
+1. Pre-oracle syntax validation with 1-shot component-level LLM regeneration retry.
+2. Optimized/reference structural independence gate (0.85 normalized AST n-gram similarity threshold, AST/CFG shape isomorphism check).
+3. Subtype validity gate (deterministic AST evidence for Types A–F).
+4. Subtype/cluster compatibility enforcement (`CLUSTER_SUBTYPE_COMPATIBILITY`, fail-closed against semantic drift).
+5. Two-phase differential verification oracle with explicit Phase A cap propagation ($C \le 5$ for recursive/combinatorial brute; $C \le 8$ default) and Phase B multi-scale constraint-regime validation.
+6. Real base-model Pass@1/Pass@10 execution probing and failure attribution (`BaseModelProber`).
+7. Structural corpus deduplication (AST/CFG similarity < 0.70).
+8. Authoritative Primary Eligibility Gating (`check_primary_eligibility`).
+9. Permanent quarantine and auxiliary routing protocol.
+
+Test Status:
+67 integration and unit tests passing (0 failures, 0 errors).
+py_compile / compileall: passed for all modules.
+git diff --check: passed.
+
+Repository status:
+LOCKED and FROZEN for primary Phase 0 experimental execution under `phase0-experiment-freeze-v7`.
