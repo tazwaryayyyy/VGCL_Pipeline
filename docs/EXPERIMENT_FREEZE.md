@@ -1,373 +1,240 @@
-# VGCL Phase 0 Experiment Freeze
+# VGCL Phase 0: Authoritative Experiment Freeze Specification
 
-Freeze version:
-phase0-experiment-freeze-v2
+## Archival Freeze Overview
 
-Previous freeze:
-phase0-experiment-freeze-v1
-
-Reason for revision:
-Calibration leakage was discovered after v1 freeze.
-HumanEval and MBPP test data were removed from calibration.
-
-Current commit:
-139ecd578cc17aa3c9ecead032d23c16a3071bc7
-
-Date:
-2026-08-08
-
-Base model:
-Qwen-2.5-1.5B-Instruct
-
-Generator model:
-Gemini-3.6-Flash
-
-Calibration dataset:
-MBPP train split only
-
-Evaluation datasets:
-HumanEval
-MBPP test
-
-Dataset separation:
-Calibration ∩ Training ∩ Evaluation = empty
-
-Training configuration:
-LoRA rank:
-16
-
-Alpha:
-32
-
-Learning rate:
-2e-4
-
-Seeds:
-42, 1337, 2026
-
-Verification:
-Two-phase differential oracle
-
-Status:
-Frozen for Phase 0 experiment execution
-
-Throughput validation addendum:
-Date:
-2026-08-14
-
-Scope:
-Batch generation, pre-oracle syntax normalization, additive oracle rejection diagnostics, and pipeline metrics.
-
-Validated semantics:
-`--batch-size` dispatches independent candidate generation workers concurrently. It does not combine multiple candidates into one Gemini request. Verification, deduplication, calibration, and ledger recording are consumed in deterministic seed order.
-
-Targeted scheduler:
-Approval feedback is restricted to subtypes tied for the lowest accepted count, with planned batch slots reserved before dispatch. This preserves the failure-targeted accepted curriculum allocation while allowing adaptive attempt ordering within tied strata.
-
-Syntax gate:
-The pre-oracle syntax stage performs parse validation plus markdown-fence and trailing-whitespace normalization only. It is not a semantic code repair system.
-
-Benchmark status:
-No real Gemini throughput result is frozen here. Local mocked benchmarking validates batching mechanics only and must not be reported as API throughput.
-
-Scientific Quality Gates addendum:
-Date:
-2026-08-15
-
-Scope:
-Four surgical scientific corrections:
-1. Optimized/reference structural independence gate (threshold 0.85 near-isomorphism rejection).
-2. Deterministic subtype validity gate (Types A–F structural AST checks, NOT_VALIDATABLE for unstratified identifiers).
-3. Complexity-aware Phase A scaling (adaptive N<=5 bound for pathological brute solvers).
-4. Controlled 1-shot component-level syntax failure regeneration with explicit retry accounting.
-
-Status:
-Verified and frozen with full test suite passing (30 tests).
+| Metadata Field | Authoritative Frozen Value |
+| :--- | :--- |
+| **Freeze Tag** | `phase0-experiment-freeze-v7` |
+| **Freeze Commit SHA** | `98398d6e49736d83fa3c39560d4d556a8a760419` (`98398d6`) |
+| **Freeze Date** | **2026-09-11** |
+| **Git Branch** | `main` (synced with `origin/main`) |
+| **Development Status** | **FROZEN / ARCHIVED** |
+| **Automated Test Suite** | **77/77 passing** (`pytest test_phase0_pipeline.py`) |
+| **Bytecode Compilation** | **Clean** (`python -m compileall -q -x "\.venv" .`) |
+| **Primary Generator Model** | `gemini-3.6-flash` (temperature `0.4`, `15 RPM` client pacing) |
+| **Fallback Generator Models** | `[gemini-3.1-flash-lite, gemini-3.5-flash-lite, gemini-flash-latest]` (auxiliary-isolated) |
+| **Frozen Base Model** | `Qwen/Qwen2.5-1.5B-Instruct` |
+| **Base Model Probing Policy** | Greedy Pass@1 ($T=0.0$), Sampled Pass@10 ($k=10, T=0.8$, top-$p=0.95$) |
+| **Probing Environment** | Remote Kaggle GPU (`kaggle_probe.py`) |
+| **Local Machine Guard** | Active (`base_model_prober.py` blocks local model weight loading) |
+| **Calibration Split** | `google-research-datasets/mbpp` (`train` split only) |
+| **Evaluation Splits** | `HumanEval`, `MBPP` (`test` split) — strictly disjoint from calibration |
+| **Dataset Separation** | $\text{Calibration} \cap \text{Training} \cap \text{Evaluation} = \emptyset$ |
 
 ---
 
-# Freeze Revision: phase0-experiment-freeze-v3
+## Why This Is an Archival Freeze
 
-Freeze version:
-phase0-experiment-freeze-v3
+Development on the VGCL Pipeline was intentionally terminated on 11 September 2026. The project completed the construction, auditing, hardening, and verification of its experimental methodology and software infrastructure. Taking the project beyond this point would have required executing the downstream empirical fine-tuning and evaluation studies on compute clusters. That work was not pursued further.
 
-Previous freeze:
-phase0-experiment-freeze-v2
-
-Reason for revision:
-Final adversarial validation and freeze of scientific quality gates (reference independence, subtype validity, complexity-aware Phase A scaling, 1-shot syntax component regeneration, retry metrics accounting, and generator model policy).
-
-Commit:
-Validated state on main branch
-
-Date:
-2026-08-15
-
-Base model:
-Qwen-2.5-1.5B-Instruct
-
-Generator model policy:
-Primary: gemini-3.6-flash
-Fallback priority: [gemini-3.6-flash, gemini-3.1-flash-lite, gemini-3.5-flash-lite, gemini-flash-latest]
-Enforcement: Model identity recorded per-call in quarantine and ledger entries; identical priority order across targeted and uniform pipelines.
-
-Calibration dataset:
-MBPP train split only (disjoint from evaluation sets)
-
-Evaluation datasets:
-HumanEval, MBPP test
-
-Quality Gates & Verification:
-1. Pre-oracle syntax validation with 1-shot component-level LLM regeneration retry.
-2. Optimized/reference structural independence gate (0.85 normalized AST n-gram similarity threshold, AST/CFG shape isomorphism check).
-3. Subtype validity gate (deterministic AST evidence for Types A–F; NOT_VALIDATABLE for uniform/unstratified identifiers).
-4. Two-phase differential verification oracle with complexity-aware Phase A scaling (N<=5 for recursive/combinatorial brute; N<=8 default) and Phase B (N>=100).
-5. Structural corpus deduplication (AST/CFG similarity < 0.70).
-6. Permanent quarantine protocol with structured rejection diagnostics.
-
-Accounting & Metrics:
-Separate accounting for initial generation API calls, syntax retry API calls, total API calls, syntax failures, syntax repairs, syntax retry successes, reference independence rejections, subtype rejections, Phase A/B passes and failures, deduplication rejections, and approvals.
-
-Test Status:
-30 integration tests passing (0 failures, 0 errors).
-py_compile: passed.
-git diff --check: passed.
-
-Repository status:
-Frozen for Phase 0 curriculum generation.
+The repository is frozen and archived at commit `98398d6` to serve as a permanent, unaltered reference of what was learned, what was implemented, what was verified through software testing, and what was left unresolved. There is no active roadmap and no planned subsequent phase.
 
 ---
 
-# Freeze Revision: phase0-experiment-freeze-v4
+## Final Scientific Status
 
-Freeze version:
-phase0-experiment-freeze-v4
+The central research hypothesis formulated for this project is:
 
-Previous freeze:
-phase0-experiment-freeze-v3
+> **"Failure-targeted verified synthetic curricula produce greater capability transfer than uniformly sampled verified synthetic curricula under identical compute budgets."**
 
-Reason for revision:
-Lock Phase 0 experimental generation configuration.
-Introduces explicit auditable EXPERIMENTAL_GENERATOR_POLICY, pre-experiment threshold calibration fixture,
-and frozen generation manifest. No scientific invariants changed.
+**The central treatment-vs-control hypothesis was NOT established by a completed final training and evaluation study.**
 
-Commit:
-(see git log — commit "Lock Phase 0 experimental generation configuration")
-
-Date:
-2026-08-16
-
-Base model:
-Qwen-2.5-1.5B-Instruct
-
-Generator model policy:
-Primary: gemini-3.6-flash
-Fallback sequence (free-tier quota failover): gemini-3.1-flash-lite → gemini-3.5-flash-lite → gemini-flash-latest
-Policy declaration: EXPERIMENTAL_GENERATOR_POLICY in targeted_generation.py (imported identically by uniform_generation.py)
-Enforcement: _MODEL_PRIORITY is constructed from EXPERIMENTAL_GENERATOR_POLICY; tested by test_16, test_17, test_18.
-Fallback activation is logged with [FALLBACK-ROUTING]; model identity recorded in every ledger entry and quarantine artifact.
-Different fallback models are not interchangeable; post-hoc normalization is prohibited.
-
-Reference-independence threshold:
-0.85
-
-Threshold calibration:
-Fixture file: phase0_calibration/reference_fixture.py
-Fixture hash: 707762ab31720b7c
-Fixture pairs: 11 total (Class 1-6 coverage)
-Result: 11/11 assertions passed.
-Duplicate/near-duplicate classes: min score 1.0000, max score 1.0000 — all REJECT at 0.85.
-Distinct algorithm classes: max score 0.0507 — all PASS at 0.85.
-Threshold cleanly separates both groups with no borderline ambiguity.
-Fixture is independent of MBPP calibration, HumanEval, MBPP-test, and any curriculum samples.
-Threshold is frozen. Adaptation based on curriculum samples is prohibited.
-
-Generation configuration file:
-phase0_calibration/config.yaml (extended with experimental_generator_policy and generation_configuration blocks)
-Reference: generation_manifest.py produces data/generation_manifest.json at pipeline start.
-
-Calibration dataset:
-MBPP train split only (disjoint from evaluation sets)
-
-Evaluation datasets:
-HumanEval, MBPP test
-
-Quality Gates & Verification:
-1. Pre-oracle syntax validation with 1-shot component-level LLM regeneration retry.
-2. Optimized/reference structural independence gate (0.85 normalized AST n-gram similarity threshold, AST/CFG shape isomorphism check).
-3. Subtype validity gate (deterministic AST evidence for Types A-F; NOT_VALIDATABLE for uniform/unstratified identifiers).
-4. Two-phase differential verification oracle with complexity-aware Phase A scaling (N<=5 for recursive/combinatorial brute; N<=8 default) and Phase B (N>=100).
-5. Structural corpus deduplication (AST/CFG similarity < 0.70).
-6. Permanent quarantine protocol with structured rejection diagnostics.
-
-New in this revision:
-- generation_manifest.py: auditable manifest written before every generation run.
-- phase0_calibration/reference_fixture.py: deterministic pre-experiment threshold calibration fixture.
-- phase0_calibration/config.yaml: extended with experimental_generator_policy and generation_configuration.
-- EXPERIMENTAL_GENERATOR_POLICY: explicit named constant replacing implicit _MODEL_PRIORITY construction.
-- Fallback routing: explicit [FALLBACK-ROUTING] log on every model switch; rate-limit detection broadened to include resource_exhausted and rate limit keywords.
-
-Test Status:
-37 integration tests passing (0 failures, 0 errors).
-py_compile: passed for all 12 modules including generation_manifest.py.
-git diff --check: passed.
-Calibration fixture: 11/11 assertions passed.
-
-Repository status:
-Frozen for Phase 0 curriculum generation.
+The repository reached a frozen experimental infrastructure state, but was not taken through a final decisive training comparison. Therefore:
+- The repository records a completed methodological and architectural investigation, **not** a confirmed empirical result.
+- No positive performance advantage for failure-targeted curriculum learning was established.
+- No negative effect was established.
+- No null result was conclusively demonstrated.
+- Passing all 77 unit and integration tests certifies software correctness and adherence to declared protocol invariants; it does not constitute scientific evidence for the validity of the curriculum hypothesis.
 
 ---
 
-# Freeze Revision: phase0-experiment-freeze-v5
+## Architectural Specification (V7 State)
 
-Freeze version:
-phase0-experiment-freeze-v5
+The final architecture addresses low-resource workstation constraints while maintaining empirical base-model probing rigor through a decoupled two-stage design:
 
-Previous freeze:
-phase0-experiment-freeze-v4
+```
++-------------------------------------------------------------------------------+
+| LOCAL WORKSTATION STAGE (Windows)                                             |
+|                                                                               |
+|  1. Candidate Generation (Gemini-3.6-Flash, Decoupled 2-Pass)                  |
+|  2. Pre-Oracle Syntax Repair & Whitespace Normalization (Max 1 retry)          |
+|  3. Reference Independence Gate (AST n-gram similarity < 0.85)                 |
+|  4. Subtype Validity Gate & Cluster Compatibility (Types A-F)                  |
+|  5. Two-Phase Differential Oracle (Phase A Small N<=8, Phase B Large N>=100)   |
+|  6. Structural Deduplication (Normalized AST + CFG graph hash, S < 0.70)       |
+|  7. Ledger Staging (PENDING_KAGGLE_PROBE in SQLite ledger)                     |
+|  8. Manifest Export (data/v7_probe_manifest.jsonl)                             |
+|                                                                               |
+|  [Local Guard]: Blocks Qwen/Qwen2.5-1.5B-Instruct weight download / loading    |
++-------------------------------------------------------------------------------+
+                                      │
+                                      ▼
++-------------------------------------------------------------------------------+
+| REMOTE KAGGLE GPU STAGE                                                       |
+|                                                                               |
+|  1. Ingest Candidates from data/v7_probe_manifest.jsonl                        |
+|  2. Load Frozen Qwen/Qwen2.5-1.5B-Instruct                                    |
+|  3. Execute Greedy Pass@1 and Sampled Pass@10 (k=10, T=0.8, top-p=0.95)       |
+|  4. Deterministic Failure Classification (FC_01 through FC_08)                |
+|  5. Compute Cryptographic SHA-256 Provenance and Probing Policy Hashes         |
+|  6. Export Probe Results to data/v7_kaggle_probe_results.jsonl                |
++-------------------------------------------------------------------------------+
+                                      │
+                                      ▼
++-------------------------------------------------------------------------------+
+| LOCAL INGESTION & PRIMARY GATING STAGE                                        |
+|                                                                               |
+|  1. Ingest data/v7_kaggle_probe_results.jsonl via merge_probe_results.py        |
+|  2. Cryptographically Verify Probing Policy and Result Hashes against Tampering|
+|  3. Evaluate Primary Eligibility (quality_gates.check_primary_eligibility):   |
+|       - Primary model used without fallback (both passes)                     |
+|       - Oracle verified and structurally deduplicated                         |
+|       - Subtype valid within declared common support                          |
+|       - Targeted condition: target_validation_status == "VALIDATED"           |
+|  4. Final Dataset Routing:                                                    |
+|       - PRIMARY_ELIGIBLE    --> data/v7_approved_curriculum.jsonl              |
+|       - AUXILIARY_NON_PRIMARY --> data/v7_auxiliary_curriculum.jsonl            |
++-------------------------------------------------------------------------------+
+```
 
-Reason for revision:
-Final pre-generation scientific hardening based on Gemini pilot observations:
-1. Phase A Admissibility & Scale Cap Propagation (V5-A): Propagate explicit derived scale cap ($C$) to test generators, filter candidate test cases with exact boundary enforcement, and record structured scale diagnostics.
-2. Phase B Constraint-Regime Multi-Scale Validation (V5-B): Extract problem constraint bounds ($N$, time limit, memory limit) and perform multi-scale test execution with AST structural scaling checks (rejecting $O(N^2)$ loops or unmemoized recursion on $N \ge 5000$, while permitting small quadratic domains $N \le 500$).
-3. Generator Model Policy & Fallback Observability (V5-C): Classify API errors (`rate_limit`, `quota_exhaustion`, `transient_server_failure`, `request_rejection`, `unknown`) to isolate infrastructure failures from candidate quality denominators; log explicit fallback reasons; audit generator model serving distribution in `ExperimentLedger` and `PipelineMetrics`.
-4. Empirical Difficulty Mathematical Audit (V5-D): Verified $1.0 - \text{base\_pass10}$ formula with explicit deterministic unit tests and edge-case boundary tests.
+### Component Details
 
-Commit:
-(see git log — commit "Harden Phase 0 verification and generation control")
+1. **Local Execution Guard (`base_model_prober.py`)**:
+   - Blocks accidental downloading and initialization of `Qwen/Qwen2.5-1.5B-Instruct` on resource-constrained local Windows machines.
+   - Raises `RuntimeError` unless running in a Kaggle environment (`KAGGLE_KERNEL_RUN_TYPE`), explicit local override (`allow_local_probe=True`), or environment variable `VGCL_ALLOW_LOCAL_QWEN_PROBE=1`.
 
-Date:
-2026-08-23
+2. **Primary Generator Policy (`EXPERIMENTAL_GENERATOR_POLICY`)**:
+   - Declared identically across targeted and uniform pipelines:
+     - Primary: `gemini-3.6-flash`
+     - Fallbacks: `[gemini-3.1-flash-lite, gemini-3.5-flash-lite, gemini-flash-latest]`
+     - Temperature: `0.4`, Client Timeout: `30.0s`, Pacing: `15 RPM`.
+   - Any candidate involving fallback in Pass 1 or Pass 2 is marked `AUXILIARY_NON_PRIMARY` and written to `data/v7_auxiliary_curriculum.jsonl`. It never enters the primary curriculum or counts toward the experimental sample budget.
 
-Base model:
-Qwen-2.5-1.5B-Instruct
+3. **Operational Failure Clusters (`failure_mapper.py`)**:
+   - `FC_01_MICRO_CORRECTNESS`: Small-scale boundary or off-by-one errors.
+   - `FC_02_SCALE_DIVERGENCE`: Passes micro-scale, fails large-scale time complexity.
+   - `FC_03_TERMINATION`: Infinite recursion, iteration cycles, or timeouts.
+   - `FC_04_BOUNDS_VIOLATION`: Container out-of-bounds (`IndexError`, `KeyError`).
+   - `FC_05_RESOURCE_FAILURE`: Excessive auxiliary space or peak memory RSS (>512MB).
+   - `FC_06_FORMAT_CONTRACT`: Return type mismatch or function signature violation.
+   - `FC_07_STATE_INCONSISTENCY`: In-place input argument mutation or cross-query state leakage.
+   - `FC_08_UNKNOWN`: General unclassified deterministic execution mismatch.
+   - *Status*: Operational and observable runtime categories, not proven mechanistic representations of neural reasoning.
 
-Generator model policy:
-Primary: gemini-3.6-flash
-Fallback sequence: [gemini-3.1-flash-lite, gemini-3.5-flash-lite, gemini-flash-latest]
-Policy declaration: EXPERIMENTAL_GENERATOR_POLICY in targeted_generation.py (imported identically by uniform_generation.py)
-Observability: fallback reasons and classified error categories logged and recorded in metrics; serving model recorded in every ledger entry and quarantine artifact.
+4. **Reference Independence Gate (`quality_gates.py`)**:
+   - Evaluates function-only AST n-gram token similarity between `solve` and `solve_brute`.
+   - Threshold: `0.85` (calibrated against 11 pre-experiment test pairs in `phase0_calibration/reference_fixture.py`, fixture hash `707762ab31720b7c`).
+   - Rejects near-isomorphic and identical CFG/AST implementations before oracle execution.
 
-Quality Gates & Verification:
-1. Pre-oracle syntax validation with 1-shot component-level LLM regeneration retry.
-2. Optimized/reference structural independence gate (0.85 normalized AST n-gram similarity threshold, AST/CFG shape isomorphism check).
-3. Subtype validity gate (deterministic AST evidence for Types A–F; NOT_VALIDATABLE for uniform/unstratified identifiers).
-4. Two-phase differential verification oracle with explicit Phase A cap propagation ($C \le 5$ for recursive/combinatorial brute; $C \le 8$ default) and Phase B multi-scale constraint-regime validation.
-5. Structural corpus deduplication (AST/CFG similarity < 0.70).
-6. Permanent quarantine protocol with enriched rejection diagnostics.
+5. **Two-Phase Differential Oracle (`oracle_refactor.py`)**:
+   - Phase A: Evaluates functional equivalence between `solve` and `solve_brute` on small inputs. Complexity-aware scaling limits pathological brute-force solvers (recursion, combinatorial calls) to $N \le 5$, with standard solvers capped at $N \le 8$.
+   - Phase B: Evaluates `solve` on large scale inputs ($N \ge 100$), multi-scale constraint compatibility, memory RSS, and structural loop nesting.
+   - *Status*: Verifies behavioral compliance under tested oracle inputs; does not constitute a formal mathematical proof of correctness or complexity bounds.
 
-Accounting & Metrics:
-Separate accounting for API infrastructure events (`api_rate_limit_events`, `api_quota_events`, `api_transient_events`, `api_other_errors`, `api_fallback_events`), model serving counts, initial generation calls, syntax retry calls, reference independence rejections, subtype rejections, Phase A/B passes and failures, deduplication rejections, and approvals.
+6. **Structural Deduplication (`cfg_dedup.py`)**:
+   - AST scope-aware variable/literal normalization + Control Flow Graph (CFG) basic-block and edge extraction.
+   - Rejects candidates with structural similarity $S \ge 0.70$ against previously accepted corpus items.
+   - *Status*: Reduces structural redundancy across the corpus; does not prove semantic uniqueness.
 
-Test Status:
-52 integration tests passing (0 failures, 0 errors).
-py_compile: passed for all modules.
-git diff --check: passed.
-Calibration fixture: 11/11 assertions passed.
+7. **Target Attribution Invariant**:
+   - A requested target cluster specified during generation (`target_failure_cluster`) does not confer primary eligibility.
+   - Only observed, classified execution failures on `Qwen/Qwen2.5-1.5B-Instruct` recorded in `target_evidence` and marked `target_validation_status = "VALIDATED"` satisfy the targeted primary gate.
 
-Repository status:
-Frozen for Phase 0 curriculum generation.
+8. **Control Condition Symmetry (`uniform_generation.py`)**:
+   - Shares identical algorithmic domain support (Types A–F Monotonic Queue / Deque structures).
+   - Uses identical generator model, prompt format contracts, quality gates, and verification oracle.
+   - Does not receive target failure cluster guidance and does not require base-model target validation, preserving true treatment-control contrast: identical machinery and compute budget, different targeting signal.
 
 ---
 
-# Freeze Revision: phase0-experiment-freeze-v6
+## Chronological Evolution: Revisions V1 through V7
 
-Freeze version:
-phase0-experiment-freeze-v6
+The safeguards and architecture documented above did not exist in the initial prototype. They were developed sequentially in response to methodological weaknesses identified during audits.
 
-Previous freeze:
-phase0-experiment-freeze-v5
+### Phase 0 Prototype (Pre-Freeze)
+- Initial prototype generated synthetic algorithmic problems guided purely by high-level paradigm themes.
+- Lacked base-model probing, empirical difficulty calibration, structural deduplication, and formal verification gates.
+- Did not constitute an experimental test of failure targeting.
 
-Reason for revision:
-Final scientific repair of Phase 0 causal chain, base-model failure attribution, and generator policy enforcement:
-1. Real Base-Model Probing Engine (`base_model_prober.py`): Replaced PRNG simulation (`calibrate_empirical_difficulty`) with deterministic execution probing of the frozen base model $\theta_{\text{base}}$ (`Qwen/Qwen2.5-1.5B-Instruct`), measuring greedy Pass@1 and sampled Pass@10 ($k=10$, $T=0.8$) under immutable probing policy hash.
-2. Direct Failure Classification & Evidence Extraction: Probe execution failures are deterministically classified using `failure_mapper.classify_failure`, recording observable execution evidence (`exception_type`, `error_msg`, execution time, memory usage) into structured failure records.
-3. Causal Target Attribution Ledger Schema (`experiment_ledger.py`): Ledger schema extended with `target_validation_status` (`VALIDATED` | `UNVERIFIED` | `NOT_APPLICABLE`), `target_evidence` (JSON trace), `probe_result_hash`, `generator_policy`, `fallback_used`, and `fallback_reason`. Invariant: `target_failure_cluster` records the requested target; `target_validation_status="VALIDATED"` certifies empirical failure evidence was observed on $\theta_{\text{base}}$.
-4. Semantic Drift Prevention Policy (`targeted_generation.py`): Enforced canonical `CLUSTER_SUBTYPE_COMPATIBILITY` mapping inside `SubtypeScheduler.select()`. The eligible subtype stratum is strictly intersected with allowed subtypes for the requested failure cluster; unknown clusters or empty intersections fail closed with `ValueError`.
-5. Generator Fallback Accounting & Anti-Contamination: `_call_llm_paced` tracks whether a fallback model was invoked. Fallback activations are recorded per candidate in `fallback_used` and `fallback_reason` in the ledger, preventing silent model promotion or unacknowledged generator contamination.
+### Revision V1 (`phase0-experiment-freeze-v1` — Commit `d0a6570`)
+- **Focus**: Initial formal pipeline freeze.
+- **Flaw Discovered**: Calibration dataset included items from HumanEval and MBPP test splits, introducing severe data contamination risk into downstream evaluation.
 
-Date:
-2026-08-30
+### Revision V2 (`phase0-experiment-freeze-v2` — Commit `674a66d`)
+- **Focus**: Evaluation data leakage repair.
+- **Repair**: HumanEval and MBPP test splits were removed from calibration. Calibration was restricted exclusively to `google-research-datasets/mbpp` (`train` split).
+- **Invariant**: Established $\text{Calibration} \cap \text{Training} \cap \text{Evaluation} = \emptyset$. Legacy contaminated artifacts archived.
 
-Base model:
-Qwen/Qwen2.5-1.5B-Instruct
+### Revision V3 (`phase0-experiment-freeze-v3` — Commit `4e29e0a`)
+- **Focus**: Scientific quality gates implementation.
+- **Flaws Discovered**:
+  - LLM frequently generated identical or trivial variations of `solve` for `solve_brute`, undermining differential oracle validity.
+  - Generated code frequently diverged from declared algorithmic subtypes.
+  - Pathological recursive brute-force references timed out during Phase A verification.
+- **Repairs**:
+  - Introduced AST n-gram reference independence gate (0.85 threshold).
+  - Introduced deterministic AST subtype validity gate for Types A–F.
+  - Added complexity-aware Phase A scale derivation ($N \le 5$ for combinatorial brute solvers).
+  - Added controlled 1-shot component-level syntax repair.
 
-Generator model policy:
-Primary: gemini-3.6-flash
-Fallback sequence: [gemini-3.1-flash-lite, gemini-3.5-flash-lite, gemini-flash-latest]
-Policy declaration: EXPERIMENTAL_GENERATOR_POLICY
+### Revision V4 (`phase0-experiment-freeze-v4` — Commit `c4b2411`)
+- **Focus**: Experimental configuration locking.
+- **Flaws Discovered**: Implicit fallback routing allowed different generator models to serve requests without audit tracking.
+- **Repairs**:
+  - Introduced explicit `EXPERIMENTAL_GENERATOR_POLICY`.
+  - Added pre-experiment reference independence threshold calibration fixture (`phase0_calibration/reference_fixture.py`, hash `707762ab31720b7c`).
+  - Added auditable `generation_manifest.py`.
 
-Quality Gates & Verification:
-1. Pre-oracle syntax validation with 1-shot component-level LLM regeneration retry.
-2. Optimized/reference structural independence gate (0.85 normalized AST n-gram similarity threshold, AST/CFG shape isomorphism check).
-3. Subtype validity gate (deterministic AST evidence for Types A–F; NOT_VALIDATABLE for uniform/unstratified identifiers).
-4. Subtype/cluster compatibility enforcement (fail-closed against semantic drift).
-5. Two-phase differential verification oracle with explicit Phase A cap propagation ($C \le 5$ for recursive/combinatorial brute; $C \le 8$ default) and Phase B multi-scale constraint-regime validation.
-6. Real base-model Pass@1/Pass@10 execution probing and failure attribution.
-7. Structural corpus deduplication (AST/CFG similarity < 0.70).
-8. Permanent quarantine protocol with enriched rejection diagnostics.
+### Revision V5 (`phase0-experiment-freeze-v5` — Commit `5ff6c3f`)
+- **Focus**: Verification hardening and scale propagation.
+- **Flaws Discovered**:
+  - Test generators produced test cases exceeding Phase A scale policies.
+  - Solutions with $O(N^2)$ complexity passed Phase B on large regimes.
+  - Difficulty scores were still simulated via PRNG heuristics.
+- **Repairs**:
+  - Exact scale cap propagation and boundary enforcement in Phase A.
+  - Multi-scale constraint regime validation in Phase B, rejecting nested loops on $N \ge 5000$.
+  - Structured API error classification.
+  - Verified empirical difficulty mathematical formulation ($1.0 - \text{pass10}$).
 
-Test Status:
-56 integration tests passing (0 failures, 0 errors).
-py_compile: passed for all modules including `base_model_prober.py`.
-git diff --check: passed.
+### Revision V6 (`phase0-experiment-freeze-v6` — Commit `98c9969`)
+- **Focus**: Real base-model probing and target attribution.
+- **Flaws Discovered**:
+  - PRNG difficulty simulation could not support empirical difficulty claims.
+  - Copying requested failure labels onto curriculum items lacked empirical basis.
+  - Subtype schedulers exhibited semantic drift away from target failure clusters.
+- **Repairs**:
+  - Replaced PRNG difficulty with real execution probing of `Qwen/Qwen2.5-1.5B-Instruct` (`base_model_prober.py`).
+  - Added deterministic failure classification and evidence extraction (`failure_mapper.py`).
+  - Extended ledger schema with `target_validation_status` (`VALIDATED` vs `UNVERIFIED`) and `target_evidence`.
+  - Enforced `CLUSTER_SUBTYPE_COMPATIBILITY` mapping to eliminate semantic drift.
 
-# Freeze Revision: phase0-experiment-freeze-v7 (FINAL)
+### Revision V7 (`phase0-experiment-freeze-v7` — Commit `98398d6`)
+- **Focus**: Two-stage remote execution, local guard, and authoritative primary gating.
+- **Flaws Discovered**:
+  - Attempting to download and run Qwen-2.5-1.5B locally exhausted memory and disk on development machines.
+  - Generator fallback under rate limits contaminated primary datasets with non-primary model samples.
+  - Uniform control required structural alignment with the targeted condition's algorithmic support domain.
+- **Repairs**:
+  - Architected two-stage pipeline: local generation/verification and remote Kaggle GPU probing (`kaggle_probe.py`).
+  - Implemented local hardware guard in `base_model_prober.py` to block accidental local Qwen weight downloads.
+  - Implemented authoritative primary eligibility gate in `quality_gates.py`, quarantining all fallback outputs to auxiliary datasets.
+  - Aligned uniform control to sample across identical Monotonic Queue subtypes (Types A–F) without failure targeting metadata.
+  - Full test suite verified at 77/77 passing tests.
 
-Freeze version:
-phase0-experiment-freeze-v7
+---
 
-Previous freeze:
-phase0-experiment-freeze-v6
+## Tag and Commit Integrity Record
 
-Reason for revision:
-Final pre-experiment scientific repair, primary dataset eligibility gating, and control symmetry alignment:
-1. Authoritative Primary Eligibility Gate (`quality_gates.py`):
-   - Implemented `check_primary_targeted_eligibility` and `check_primary_uniform_eligibility` as the single source of truth.
-   - Distinguishes `PRIMARY_ELIGIBLE` from `AUXILIARY_NON_PRIMARY` and `REJECTED`.
-   - Invariant: Only candidates produced by the frozen primary generator model (`gemini-3.6-flash`) across both decoupled passes without fallback, verified by oracle, non-duplicate, subtype-valid, and (for targeted) possessing confirmed empirical base-model failure attribution (`target_validation_status == "VALIDATED"`) are accepted into the primary curriculum.
-2. Control Condition Scientific Symmetry (`uniform_generation.py`):
-   - Aligned uniform control to sample from the identical common support domain (Types A–F Monotonic Queue / Deque structures) without receiving failure target cluster metadata.
-   - Uniform control does NOT require base-model target failure validation, preserving true control condition causality: same support, same machinery, same budget, same generator policy; different targeting signal.
-3. Generator Fallback Isolation & Anti-Contamination:
-   - Decoupled two-pass model tracking (`generator_model_pass1`, `generator_model_pass2`, `fallback_used_pass1`, `fallback_used_pass2`, `fallback_reason_pass1`, `fallback_reason_pass2`).
-   - If fallback occurs in either pass, candidate is immutably routed to auxiliary datasets (`data/v7_auxiliary_curriculum.jsonl`, `data/v7_uniform_auxiliary_curriculum.jsonl`) and does not count towards the primary curriculum sample budget.
-4. Deterministic Behavioral Profiles (`CLUSTER_BEHAVIOR_PROMPTS`):
-   - Added deterministic observable failure descriptions for all 8 clusters in `targeted_generation.py`.
-5. Dataset Namespaces & Historical Immutability:
-   - Historical V5/V6 data preserved. Primary experimental runs write exclusively to V7 namespaces (`v7_approved_curriculum.jsonl`, `v7_experiment_ledger.db`, `v7_uniform_approved_curriculum.jsonl`, `v7_uniform_experiment_ledger.db`).
-6. Two-Stage Execution & Local Guard Architecture:
-   - Preserves low-resource local Windows machines: Qwen/Qwen2.5-1.5B-Instruct weights and inference are strictly offloaded to remote Kaggle GPU execution via `kaggle_probe.py`.
-   - Generation and oracle verification run locally with `--mode local`, registering candidates in the ledger as `PENDING_KAGGLE_PROBE` and emitting `data/v7_probe_manifest.jsonl`.
-   - Remote probing records are cryptographically verified and merged into `data/v7_approved_curriculum.jsonl` via `merge_probe_results.py`.
-   - Local guard ensures zero Qwen weight downloads on development machines without compromising the real base-model probe invariant.
+- **Authoritative Identity**: The authoritative identity of this final freeze is commit SHA `98398d6e49736d83fa3c39560d4d556a8a760419`.
+- **Tag State**: Tag `phase0-experiment-freeze-v7` points to commit `98398d6`.
+- **Note on Git Tags**: Because git tags can be mutable across remotes, external auditors must treat the commit SHA (`98398d6`) as the immutable ground truth for the final frozen state.
 
-Date:
-2026-08-30
+---
 
-Base model:
-Qwen/Qwen2.5-1.5B-Instruct
+## Summary of Unanswered Research Questions
 
-Generator model policy:
-Primary: gemini-3.6-flash
-Fallback sequence: [gemini-3.1-flash-lite, gemini-3.5-flash-lite, gemini-flash-latest]
-Policy declaration: EXPERIMENTAL_GENERATOR_POLICY
-
-Quality Gates & Verification:
-1. Pre-oracle syntax validation with 1-shot component-level LLM regeneration retry.
-2. Optimized/reference structural independence gate (0.85 normalized AST n-gram similarity threshold, AST/CFG shape isomorphism check).
-3. Subtype validity gate (deterministic AST evidence for Types A–F).
-4. Subtype/cluster compatibility enforcement (`CLUSTER_SUBTYPE_COMPATIBILITY`, fail-closed against semantic drift).
-5. Two-phase differential verification oracle with explicit Phase A cap propagation ($C \le 5$ for recursive/combinatorial brute; $C \le 8$ default) and Phase B multi-scale constraint-regime validation.
-6. Real base-model Pass@1/Pass@10 execution probing and failure attribution (`BaseModelProber`).
-7. Structural corpus deduplication (AST/CFG similarity < 0.70).
-8. Authoritative Primary Eligibility Gating (`check_primary_eligibility`).
-9. Permanent quarantine and auxiliary routing protocol.
-
-Test Status:
-67 integration and unit tests passing (0 failures, 0 errors).
-py_compile / compileall: passed for all modules.
-git diff --check: passed.
-
-Repository status:
-LOCKED and FROZEN for primary Phase 0 experimental execution under `phase0-experiment-freeze-v7`.
+1. Does failure-targeted synthetic curriculum learning produce statistically significant improvements in capability transfer compared to uniform curriculum learning under matched compute budgets?
+2. What is the empirical transfer matrix $M_{k,j}$ across failure clusters when fine-tuning a 1.5B model?
+3. How do findings from 1.5B base models transfer to larger dense or mixture-of-experts architectures?
+4. Can operational failure clusters based on runtime exceptions accurately approximate the underlying latent failure distributions of language models?
