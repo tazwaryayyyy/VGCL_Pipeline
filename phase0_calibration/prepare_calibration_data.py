@@ -5,9 +5,17 @@ import yaml
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
-# Load tokenizer to accurately determine target token IDs for Qwen 2.5
+# Lazy tokenizer loader to prevent eager Hugging Face downloads on local import
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+_tokenizer = None
+
+
+def get_tokenizer():
+    global _tokenizer
+    if _tokenizer is None:
+        from transformers import AutoTokenizer
+        _tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    return _tokenizer
 
 
 def extract_first_token(code_solution: str) -> str:
@@ -16,6 +24,7 @@ def extract_first_token(code_solution: str) -> str:
     if not stripped:
         return "return"
 
+    tokenizer = get_tokenizer()
     # Tokenize solution and extract the first token string
     tokens = tokenizer.tokenize(stripped)
     if tokens:

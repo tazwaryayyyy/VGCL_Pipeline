@@ -235,6 +235,13 @@ The Phase 0 V7 freeze addresses the causal attribution chain from base model obs
    - 2-pass tracking: `generator_model_pass1`, `generator_model_pass2`, `fallback_used_pass1`, `fallback_used_pass2`.
    - If fallback occurs in either pass, candidate is marked `AUXILIARY_NON_PRIMARY` and routed to auxiliary files (`data/v7_auxiliary_curriculum.jsonl`, `data/v7_uniform_auxiliary_curriculum.jsonl`). It never enters the primary dataset or counts toward the primary budget.
 
+6. **Local Execution Guard & Two-Stage Kaggle Probing Architecture**:
+   - **Local Resource Guard (`local_guard`)**: To support resource-constrained local developer workstations (e.g. Windows laptops with limited RAM and disk), the local pipeline guarantees that `Qwen/Qwen2.5-1.5B-Instruct` is **never downloaded, cached, loaded, or initialized** on the local machine. Initializing `BaseModelProber` locally without explicitly bypassing the guard fails immediately.
+   - **Stage 1 (Local Candidate Generation & Verification)**: `targeted_generation.py --mode local` and `uniform_generation.py --mode local` execute all Gemini generation, syntax repairs, reference independence checks (0.85 threshold), subtype checks, 2-phase differential oracle verification, and structural deduplication locally. Approved candidates are registered in `v7_experiment_ledger.db` as `PENDING_KAGGLE_PROBE` and exported to `data/v7_probe_manifest.jsonl`.
+   - **Stage 2 (Remote Base-Model Execution on Kaggle)**: `kaggle_probe.py --manifest data/v7_probe_manifest.jsonl --output data/v7_kaggle_probe_results.jsonl` executes on Kaggle GPU instances. It loads the real frozen `Qwen/Qwen2.5-1.5B-Instruct`, evaluates greedy Pass@1 and sampled Pass@10, extracts observable execution failures, and computes a cryptographic SHA-256 provenance hash `probe_result_hash` and `probing_policy_hash`.
+   - **Stage 3 (Cryptographic Ingestion & Gating)**: `merge_probe_results.py` imports Kaggle probe results locally, verifies the provenance hash and probing policy hash against tampering, and applies the authoritative V7 primary eligibility gate.
+   - **Scientific Invariant Preserved**: Real base-model probing is never replaced by random scores, heuristics, LLM self-evaluations, or mock labels. The causal foundation remains intact.
+
 ### Remaining Reproducibility Limitations
 1. **API Non-Determinism**: Upstream hosted LLM sampling exhibits minor non-determinism even at fixed temperature and seed parameters.
 2. **Fallback model isolation**: Fallback candidates are strictly quarantined to auxiliary datasets and segregated from primary experimental metrics.

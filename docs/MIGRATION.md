@@ -55,29 +55,39 @@ print("Migration completed successfully.")
 
 ---
 
-## 3. Running Phase 0 Experiments
+## 3. Running Phase 0 Experiments (Local Generation & Remote Probing)
 
-### Step 1: Base Model Failure Mapping
+### Step 1: Base Model Failure Mapping (Remote Kaggle / GPU)
 ```bash
 python failure_mapper.py
 ```
 
-### Step 2: Failure-Targeted Curriculum Generation
+### Step 2: Local Candidate Generation (Targeted)
 ```bash
-python targeted_generation.py --target-failure-cluster FC_01_MICRO_CORRECTNESS --num-samples 50
+python targeted_generation.py --target-failure-cluster FC_01_MICRO_CORRECTNESS --num-samples 50 --mode local
 ```
 
-### Step 3: Uniform-Sampling Control Generation
+### Step 3: Local Candidate Generation (Uniform Control)
 ```bash
-python uniform_generation.py --num-samples 50
+python uniform_generation.py --num-samples 50 --mode local
 ```
 
-### Step 4: Capability Transfer Analysis
+### Step 4: Remote Base-Model Probing (Executed on Kaggle GPU)
+```bash
+python kaggle_probe.py --manifest data/v7_probe_manifest.jsonl --output data/v7_kaggle_probe_results.jsonl
+```
+
+### Step 5: Ingest & Merge Probe Results into Ledger
+```bash
+python merge_probe_results.py --probes data/v7_kaggle_probe_results.jsonl
+```
+
+### Step 6: Capability Transfer Analysis
 ```bash
 python transfer_matrix.py
 ```
 
-### Step 5: Statistical Significance Testing
+### Step 7: Statistical Significance Testing
 ```bash
 python statistical_analysis.py
 ```

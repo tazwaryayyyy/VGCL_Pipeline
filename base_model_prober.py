@@ -99,6 +99,9 @@ class ProbingResult:
 # ---------------------------------------------------------------------------
 
 
+LOCAL_PROBE_OVERRIDE_ENV: str = "VGCL_ALLOW_LOCAL_QWEN_PROBE"
+
+
 class BaseModelProber:
     """
     Probes Qwen/Qwen2.5-1.5B-Instruct against a curriculum problem to
@@ -106,19 +109,45 @@ class BaseModelProber:
     evidence for targeted curriculum generation.
 
     The model is loaded lazily on first call and cached for the session.
+    Protected by a local execution guard to prevent accidental local weight downloads.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, device: Optional[str] = None, allow_local_probe: bool = False) -> None:
         self._model = None
         self._tokenizer = None
-        self._device: str = "cpu"
+        self._device: str = device or ("cuda" if self._is_cuda_available() else "cpu")
+        self._allow_local_probe: bool = allow_local_probe
         self._load_error: Optional[str] = None
 
+    @staticmethod
+    def _is_cuda_available() -> bool:
+        try:
+            import torch
+            return torch.cuda.is_available()
+        except ImportError:
+            return False
+
     def _ensure_model(self) -> None:
-        """Loads model and tokenizer if not already loaded."""
+        """Loads model and tokenizer if not already loaded, enforcing local environment guards."""
         if self._model is not None or self._load_error is not None:
             return
+
+        is_kaggle = "KAGGLE_KERNEL_RUN_TYPE" in os.environ or "KAGGLE_DATA_PROXY_TOKEN" in os.environ
+        override_set = os.environ.get(LOCAL_PROBE_OVERRIDE_ENV) == "1"
+        if not (self._allow_local_probe or is_kaggle or override_set):
+            raise RuntimeError(
+                f"[VGCL LOCAL GUARD] Local loading of {BASE_MODEL_ID} is BLOCKED on this machine.\n"
+                "Reason: Local hardware constraints (disk/RAM). Base-model probing must be performed on Kaggle.\n"
+                "Workflow:\n"
+                "  1. Run candidate generation locally (exports to data/v7_probe_manifest.jsonl)\n"
+                "  2. Run 'python kaggle_probe.py --input data/v7_probe_manifest.jsonl --output data/v7_kaggle_probe_results.jsonl' on Kaggle\n"
+                "  3. Merge results locally using 'python merge_probe_results.py ...'\n"
+                "To override this guard on a dedicated local GPU machine, set environment variable:\n"
+                f"    {LOCAL_PROBE_OVERRIDE_ENV}=1"
+            )
+
         try:
+            os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
             import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -130,7 +159,9 @@ class BaseModelProber:
             self._tokenizer = AutoTokenizer.from_pretrained(
                 BASE_MODEL_ID, trust_remote_code=True
             )
-            import torch
+            if self._tokenizer.pad_token_id is None:
+                self._tokenizer.pad_token_id = self._tokenizer.eos_token_id
+
             self._model = AutoModelForCausalLM.from_pretrained(
                 BASE_MODEL_ID,
                 torch_dtype=torch.float16 if self._device == "cuda" else torch.float32,
@@ -138,6 +169,13 @@ class BaseModelProber:
                 trust_remote_code=True,
             )
             self._model.eval()
+
+            # Normalize generation_config to silence transformers warnings in greedy mode
+            if hasattr(self._model, "generation_config") and self._model.generation_config is not None:
+                self._model.generation_config.temperature = None
+                self._model.generation_config.top_p = None
+                self._model.generation_config.top_k = None
+
             print("  [PROBER] Model loaded.", flush=True)
         except Exception as exc:
             self._load_error = f"Model load failed: {exc}"
@@ -171,18 +209,26 @@ class BaseModelProber:
         """Generates a single code completion from the base model."""
         import torch
 
-        input_ids = self._tokenizer.encode(prompt, return_tensors="pt").to(self._device)
+        encoded = self._tokenizer(prompt, return_tensors="pt")
+        input_ids = encoded["input_ids"].to(self._device)
+        attention_mask = encoded["attention_mask"].to(self._device)
+
         with torch.no_grad():
             gen_kwargs: Dict[str, Any] = {
                 "max_new_tokens": PROBING_POLICY["max_new_tokens"],
                 "do_sample": do_sample,
-                "pad_token_id": self._tokenizer.eos_token_id,
+                "pad_token_id": self._tokenizer.pad_token_id,
+                "attention_mask": attention_mask,
             }
             if do_sample:
                 gen_kwargs["temperature"] = temperature
                 gen_kwargs["top_p"] = PROBING_POLICY["top_p"]
                 # Seed reproducibility for sampled decoding
                 torch.manual_seed(seed)
+            else:
+                gen_kwargs["temperature"] = None
+                gen_kwargs["top_p"] = None
+                gen_kwargs["top_k"] = None
 
             output = self._model.generate(input_ids, **gen_kwargs)
 

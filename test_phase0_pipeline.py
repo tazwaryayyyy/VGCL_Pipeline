@@ -1549,6 +1549,588 @@ class TestPhase0Pipeline(unittest.TestCase):
         self.assertEqual(PROBING_POLICY["temperature_pass1"], 0.0)
         self.assertEqual(PROBING_POLICY["temperature_pass10"], 0.8)
 
+    def test_53_local_guard_blocks_qwen_download(self):
+        """Test 53: BaseModelProber._ensure_model() raises RuntimeError on local machine without explicit override."""
+        import os
+        from base_model_prober import BaseModelProber, LOCAL_PROBE_OVERRIDE_ENV
+
+        old_val = os.environ.pop(LOCAL_PROBE_OVERRIDE_ENV, None)
+        try:
+            prober = BaseModelProber(allow_local_probe=False)
+            with self.assertRaises(RuntimeError) as ctx:
+                prober._ensure_model()
+            self.assertIn("[VGCL LOCAL GUARD]", str(ctx.exception))
+            self.assertIn("Base-model probing must be performed on Kaggle", str(ctx.exception))
+        finally:
+            if old_val is not None:
+                os.environ[LOCAL_PROBE_OVERRIDE_ENV] = old_val
+
+    def test_54_local_targeted_generation_creates_manifest_without_qwen(self):
+        """Test 54: Local targeted generation exports candidates to manifest with PENDING_PROBE status, without Qwen."""
+        import json
+        from unittest.mock import patch
+        from targeted_generation import run_targeted_generation_pipeline
+        import targeted_generation
+
+        manifest_path = os.path.join(self.test_dir, "test_v7_probe_manifest.jsonl")
+        ledger_db = os.path.join(self.test_dir, "test_local_targeted.db")
+        approved_jsonl = os.path.join(self.test_dir, "test_local_approved.jsonl")
+        aux_jsonl = os.path.join(self.test_dir, "test_local_aux.jsonl")
+
+        mock_code_blocks = {
+            "spec": "Solve sliding window maximum for given array and k.",
+            "solve_opt": "def solve(nums, k):\n    import collections\n    d = collections.deque()\n    res = []\n    for i, x in enumerate(nums):\n        while d and d[0] <= i - k: d.popleft()\n        while d and nums[d[-1]] <= x: d.pop()\n        d.append(i)\n        if i >= k - 1: res.append(nums[d[0]])\n    return res\n",
+            "solve_brute": "def solve_brute(nums, k):\n    res = []\n    for i in range(len(nums) - k + 1):\n        res.append(max(nums[i:i+k]))\n    return res\n",
+            "test_gen": "import random\ndef generate_test_cases(seed, scale):\n    random.seed(seed)\n    return [([1, 3, -1, -3, 5, 3, 6, 7], 3)]\n",
+        }
+        # Return value: (ok, blocks, m1, m2, latency, api_calls, fb1, fb2, fb_reason1, fb_reason2)
+        mock_return = (
+            True,
+            mock_code_blocks,
+            "gemini-3.6-flash",
+            "gemini-3.6-flash",
+            0.5,
+            2,
+            False,
+            False,
+            "",
+            "",
+        )
+
+        with patch("targeted_generation.generate_targeted_candidate", return_value=mock_return):
+            run_targeted_generation_pipeline(
+                target_cluster="FC_01_MICRO_CORRECTNESS",
+                num_samples=1,
+                batch_size=1,
+                mode="local",
+                probe_manifest_path=manifest_path,
+                db_path=ledger_db,
+                jsonl_path=approved_jsonl,
+                aux_jsonl_path=aux_jsonl,
+            )
+
+        self.assertTrue(os.path.exists(manifest_path))
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            lines = [json.loads(line) for line in f]
+        self.assertEqual(len(lines), 1)
+        cand = lines[0]
+        self.assertEqual(cand["condition_type"], "TARGETED")
+        self.assertEqual(cand["target_failure_cluster"], "FC_01_MICRO_CORRECTNESS")
+        self.assertIn("spec", cand)
+        self.assertIn("solve_brute", cand)
+        self.assertIn("test_gen", cand)
+
+        ledger = ExperimentLedger(db_path=ledger_db, jsonl_path=approved_jsonl, aux_jsonl_path=aux_jsonl)
+        entries = ledger.get_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["target_validation_status"], "PENDING_PROBE")
+        self.assertEqual(entries[0]["primary_eligibility_status"], "PENDING_KAGGLE_PROBE")
+        self.assertIsNone(targeted_generation._base_model_prober)
+
+    def test_55_local_uniform_generation_creates_manifest_without_qwen(self):
+        """Test 55: Local uniform generation exports control candidates without targeting or Qwen loading."""
+        import json
+        from unittest.mock import patch
+        from uniform_generation import run_uniform_generation_pipeline
+        import uniform_generation
+
+        manifest_path = os.path.join(self.test_dir, "test_v7_probe_manifest_uni.jsonl")
+        ledger_db = os.path.join(self.test_dir, "test_local_uniform.db")
+        approved_jsonl = os.path.join(self.test_dir, "test_local_approved_uni.jsonl")
+        aux_jsonl = os.path.join(self.test_dir, "test_local_aux_uni.jsonl")
+
+        mock_code_blocks = {
+            "spec": "Solve sliding window maximum for given array and k.",
+            "solve_opt": "def solve(nums, k):\n    import collections\n    d = collections.deque()\n    res = []\n    for i, x in enumerate(nums):\n        while d and d[0] <= i - k: d.popleft()\n        while d and nums[d[-1]] <= x: d.pop()\n        d.append(i)\n        if i >= k - 1: res.append(nums[d[0]])\n    return res\n",
+            "solve_brute": "def solve_brute(nums, k):\n    res = []\n    for i in range(len(nums) - k + 1):\n        res.append(max(nums[i:i+k]))\n    return res\n",
+            "test_gen": "import random\ndef generate_test_cases(seed, scale):\n    random.seed(seed)\n    return [([1, 3, -1, -3, 5, 3, 6, 7], 3)]\n",
+        }
+        mock_return = (
+            True,
+            mock_code_blocks,
+            "gemini-3.6-flash",
+            "gemini-3.6-flash",
+            0.5,
+            2,
+            False,
+            False,
+            "",
+            "",
+        )
+
+        with patch("uniform_generation.generate_uniform_candidate", return_value=mock_return):
+            run_uniform_generation_pipeline(
+                num_samples=1,
+                batch_size=1,
+                mode="local",
+                probe_manifest_path=manifest_path,
+                db_path=ledger_db,
+                jsonl_path=approved_jsonl,
+                aux_jsonl_path=aux_jsonl,
+            )
+
+        self.assertTrue(os.path.exists(manifest_path))
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            lines = [json.loads(line) for line in f]
+        self.assertEqual(len(lines), 1)
+        cand = lines[0]
+        self.assertEqual(cand["condition_type"], "UNIFORM")
+        self.assertEqual(cand["target_failure_cluster"], "UNIFORM_CONTROL")
+
+        ledger = ExperimentLedger(db_path=ledger_db, jsonl_path=approved_jsonl, aux_jsonl_path=aux_jsonl)
+        entries = ledger.get_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["target_validation_status"], "NOT_APPLICABLE")
+        self.assertEqual(entries[0]["primary_eligibility_status"], "PENDING_KAGGLE_PROBE")
+        self.assertIsNone(uniform_generation._base_model_prober)
+
+    def test_56_kaggle_probing_mocked_execution(self):
+        """Test 56: Kaggle-side probing reads manifest, executes probe, and produces hashed probe results."""
+        import json
+        from unittest.mock import MagicMock
+        from kaggle_probe import run_kaggle_probing
+        from base_model_prober import BaseModelProber, ProbingResult
+
+        manifest_path = os.path.join(self.test_dir, "test_manifest_for_kaggle.jsonl")
+        out_path = os.path.join(self.test_dir, "test_kaggle_results.jsonl")
+
+        cand = {
+            "problem_id": "VGCL_PROB_KAGGLE_01",
+            "condition_type": "TARGETED",
+            "target_failure_cluster": "FC_01_MICRO_CORRECTNESS",
+            "monotonic_queue_subtype": "Type A: sliding-window extrema",
+            "spec": "Spec text",
+            "solve_brute": "def solve_brute(x): return x",
+            "test_gen": "def generate_test_cases(s, sc): return [(1,)]",
+            "seed": 1001,
+        }
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(cand) + "\n")
+
+        mock_prober = MagicMock(spec=BaseModelProber)
+        mock_prober.probe.return_value = ProbingResult(
+            problem_id="VGCL_PROB_KAGGLE_01",
+            base_model_id="Qwen/Qwen2.5-1.5B-Instruct",
+            probing_policy_version="v1.0_qwen25_1.5b_instruct",
+            probing_policy_hash="policy_hash_001",
+            probe_timestamp=1787770000.0,
+            probe_seeds=[101],
+            pass1=0.0,
+            pass10=0.0,
+            empirical_difficulty=1.0,
+            failure_cluster_id="FC_01_MICRO_CORRECTNESS",
+            failure_category="CORRECTNESS_FAILURE_MICRO",
+            failure_evidence={"exception_type": "MismatchError", "error_msg": "test failure"},
+            tokenizer_vocab_size=151936,
+            tokenizer_name_or_path="Qwen/Qwen2.5-1.5B-Instruct",
+        )
+
+        res_summary = run_kaggle_probing(
+            manifest_path=manifest_path,
+            output_path=out_path,
+            prober=mock_prober,
+        )
+        self.assertEqual(res_summary["total_probed"], 1)
+        self.assertEqual(res_summary["validated_count"], 1)
+
+        with open(out_path, "r", encoding="utf-8") as f:
+            records = [json.loads(line) for line in f]
+        self.assertEqual(len(records), 1)
+        rec = records[0]
+        self.assertEqual(rec["problem_id"], "VGCL_PROB_KAGGLE_01")
+        self.assertEqual(rec["target_validation_status"], "VALIDATED")
+        self.assertTrue(len(rec["probe_result_hash"]) > 0)
+        self.assertEqual(rec["base_model_id"], "Qwen/Qwen2.5-1.5B-Instruct")
+
+    def test_57_merge_probe_results_validated_primary(self):
+        """Test 57: Valid Kaggle probe result merges into ledger and approves targeted candidate as primary."""
+        import json
+        import hashlib
+        from merge_probe_results import merge_probe_results
+        from base_model_prober import _PROBING_POLICY_HASH, BASE_MODEL_ID
+
+        db_path = os.path.join(self.test_dir, "test_merge_prim.db")
+        approved_jsonl = os.path.join(self.test_dir, "test_merge_approved.jsonl")
+        aux_jsonl = os.path.join(self.test_dir, "test_merge_aux.jsonl")
+        probes_path = os.path.join(self.test_dir, "test_merge_probes.jsonl")
+
+        ledger = ExperimentLedger(db_path=db_path, jsonl_path=approved_jsonl, aux_jsonl_path=aux_jsonl)
+        entry = LedgerEntry(
+            problem_id="PROB_MERGE_001",
+            seed=2001,
+            target_failure_cluster="FC_01_MICRO_CORRECTNESS",
+            monotonic_queue_subtype="Type A: sliding-window extrema",
+            target_validation_status="PENDING_PROBE",
+            target_evidence="{}",
+            probe_result_hash="",
+            generator_model="gemini-3.6-flash",
+            fallback_used=False,
+            primary_eligibility_status="PENDING_KAGGLE_PROBE",
+            phase_a_pass_count=20,
+            phase_b_pass=True,
+            verification_status="APPROVED",
+            ast_hash="ast_merge_1",
+            similarity_score=0.15,
+        )
+        ledger.record_entry(entry)
+
+        raw_probe = {
+            "problem_id": "PROB_MERGE_001",
+            "base_model_id": BASE_MODEL_ID,
+            "probing_policy_version": "v1.0_qwen25_1.5b_instruct",
+            "probing_policy_hash": _PROBING_POLICY_HASH,
+            "probe_timestamp": 1787770000.0,
+            "probe_seeds": [101],
+            "pass1": 0.0,
+            "pass10": 0.0,
+            "empirical_difficulty": 1.0,
+            "failure_cluster_id": "FC_01_MICRO_CORRECTNESS",
+            "failure_category": "CORRECTNESS_FAILURE_MICRO",
+            "failure_evidence": {"exception_type": "MismatchError", "error_msg": "Phase A mismatch"},
+            "tokenizer_vocab_size": 151936,
+            "tokenizer_name_or_path": BASE_MODEL_ID,
+        }
+        probe_hash = hashlib.sha256(json.dumps(raw_probe, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+        probe_rec = {
+            "problem_id": "PROB_MERGE_001",
+            "condition_type": "TARGETED",
+            "target_failure_cluster": "FC_01_MICRO_CORRECTNESS",
+            "target_validation_status": "VALIDATED",
+            "target_evidence": raw_probe["failure_evidence"],
+            "base_pass1": 0.0,
+            "base_pass10": 0.0,
+            "empirical_difficulty": 1.0,
+            "probe_result_hash": probe_hash,
+            "probe_timestamp": 1787770000.0,
+            "base_model_id": BASE_MODEL_ID,
+            "probing_policy_version": "v1.0_qwen25_1.5b_instruct",
+            "probing_policy_hash": _PROBING_POLICY_HASH,
+            "raw_probe_result": raw_probe,
+        }
+        with open(probes_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(probe_rec) + "\n")
+
+        summary = merge_probe_results(
+            probes_path=probes_path,
+            db_path=db_path,
+            approved_jsonl=approved_jsonl,
+            aux_jsonl=aux_jsonl,
+        )
+        self.assertEqual(summary["primary_approved"], 1)
+        self.assertEqual(summary["auxiliary_routed"], 0)
+
+        entries = ledger.get_primary_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["target_validation_status"], "VALIDATED")
+        self.assertEqual(entries[0]["primary_eligibility_status"], "PRIMARY_ELIGIBLE")
+
+    def test_58_merge_probe_results_unverified_auxiliary(self):
+        """Test 58: Candidate failing empirical target validation is routed to auxiliary curriculum."""
+        import json
+        import hashlib
+        from merge_probe_results import merge_probe_results
+        from base_model_prober import _PROBING_POLICY_HASH, BASE_MODEL_ID
+
+        db_path = os.path.join(self.test_dir, "test_merge_unv.db")
+        approved_jsonl = os.path.join(self.test_dir, "test_merge_unv_app.jsonl")
+        aux_jsonl = os.path.join(self.test_dir, "test_merge_unv_aux.jsonl")
+        probes_path = os.path.join(self.test_dir, "test_merge_unv_probes.jsonl")
+
+        ledger = ExperimentLedger(db_path=db_path, jsonl_path=approved_jsonl, aux_jsonl_path=aux_jsonl)
+        entry = LedgerEntry(
+            problem_id="PROB_MERGE_UNV_01",
+            seed=2002,
+            target_failure_cluster="FC_01_MICRO_CORRECTNESS",
+            monotonic_queue_subtype="Type A: sliding-window extrema",
+            target_validation_status="PENDING_PROBE",
+            target_evidence="{}",
+            probe_result_hash="",
+            generator_model="gemini-3.6-flash",
+            fallback_used=False,
+            primary_eligibility_status="PENDING_KAGGLE_PROBE",
+            phase_a_pass_count=20,
+            phase_b_pass=True,
+            verification_status="APPROVED",
+            ast_hash="ast_merge_unv",
+            similarity_score=0.15,
+        )
+        ledger.record_entry(entry)
+
+        raw_probe = {
+            "problem_id": "PROB_MERGE_UNV_01",
+            "base_model_id": BASE_MODEL_ID,
+            "probing_policy_version": "v1.0_qwen25_1.5b_instruct",
+            "probing_policy_hash": _PROBING_POLICY_HASH,
+            "probe_timestamp": 1787770000.0,
+            "probe_seeds": [101],
+            "pass1": 0.0,
+            "pass10": 0.0,
+            "empirical_difficulty": 1.0,
+            "failure_cluster_id": "FC_02_SCALE_DIVERGENCE",
+            "failure_category": "SCALE_DIVERGENCE",
+            "failure_evidence": {"exception_type": "TimeoutError", "error_msg": "Timeout"},
+            "tokenizer_vocab_size": 151936,
+            "tokenizer_name_or_path": BASE_MODEL_ID,
+        }
+        probe_hash = hashlib.sha256(json.dumps(raw_probe, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+        probe_rec = {
+            "problem_id": "PROB_MERGE_UNV_01",
+            "condition_type": "TARGETED",
+            "target_failure_cluster": "FC_01_MICRO_CORRECTNESS",
+            "target_validation_status": "UNVERIFIED",
+            "target_evidence": raw_probe["failure_evidence"],
+            "base_pass1": 0.0,
+            "base_pass10": 0.0,
+            "empirical_difficulty": 1.0,
+            "probe_result_hash": probe_hash,
+            "probe_timestamp": 1787770000.0,
+            "base_model_id": BASE_MODEL_ID,
+            "probing_policy_version": "v1.0_qwen25_1.5b_instruct",
+            "probing_policy_hash": _PROBING_POLICY_HASH,
+            "raw_probe_result": raw_probe,
+        }
+        with open(probes_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(probe_rec) + "\n")
+
+        summary = merge_probe_results(
+            probes_path=probes_path,
+            db_path=db_path,
+            approved_jsonl=approved_jsonl,
+            aux_jsonl=aux_jsonl,
+        )
+        self.assertEqual(summary["primary_approved"], 0)
+        self.assertEqual(summary["auxiliary_routed"], 1)
+        self.assertFalse(os.path.exists(approved_jsonl))
+        self.assertTrue(os.path.exists(aux_jsonl))
+
+    def test_59_merge_probe_results_rejects_hash_mismatch(self):
+        """Test 59: Merging probe results with tampered probe_result_hash raises ValueError."""
+        import json
+        from merge_probe_results import merge_probe_results
+        from base_model_prober import _PROBING_POLICY_HASH, BASE_MODEL_ID
+
+        db_path = os.path.join(self.test_dir, "test_merge_tamper.db")
+        probes_path = os.path.join(self.test_dir, "test_merge_tamper_probes.jsonl")
+
+        ledger = ExperimentLedger(db_path=db_path)
+        ledger._ensure_tables()
+
+        probe_rec = {
+            "problem_id": "PROB_TAMPER_01",
+            "condition_type": "TARGETED",
+            "target_failure_cluster": "FC_01_MICRO_CORRECTNESS",
+            "target_validation_status": "VALIDATED",
+            "probe_result_hash": "tampered_fake_hash",
+            "base_model_id": BASE_MODEL_ID,
+            "probing_policy_hash": _PROBING_POLICY_HASH,
+            "raw_probe_result": {"arbitrary": "data"},
+        }
+        with open(probes_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(probe_rec) + "\n")
+
+        with self.assertRaises(ValueError) as ctx:
+            merge_probe_results(probes_path=probes_path, db_path=db_path)
+        self.assertIn("Provenance hash mismatch", str(ctx.exception))
+
+    def test_60_merge_probe_results_rejects_unknown_candidate(self):
+        """Test 60: Merging probe results for a candidate not in the local ledger raises KeyError."""
+        import json
+        import hashlib
+        from merge_probe_results import merge_probe_results
+        from base_model_prober import _PROBING_POLICY_HASH, BASE_MODEL_ID
+
+        db_path = os.path.join(self.test_dir, "test_merge_unknown.db")
+        probes_path = os.path.join(self.test_dir, "test_merge_unknown_probes.jsonl")
+
+        ledger = ExperimentLedger(db_path=db_path)
+        ledger._ensure_tables()
+
+        raw_probe = {"key": "val"}
+        probe_hash = hashlib.sha256(json.dumps(raw_probe, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+        probe_rec = {
+            "problem_id": "NON_EXISTENT_PROB_999",
+            "condition_type": "TARGETED",
+            "target_failure_cluster": "FC_01_MICRO_CORRECTNESS",
+            "target_validation_status": "VALIDATED",
+            "probe_result_hash": probe_hash,
+            "base_model_id": BASE_MODEL_ID,
+            "probing_policy_hash": _PROBING_POLICY_HASH,
+            "raw_probe_result": raw_probe,
+        }
+        with open(probes_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(probe_rec) + "\n")
+
+        with self.assertRaises(KeyError) as ctx:
+            merge_probe_results(probes_path=probes_path, db_path=db_path)
+        self.assertIn("NON_EXISTENT_PROB_999", str(ctx.exception))
+
+    def test_61_merge_probe_results_uniform_control(self):
+        """Test 61: Uniform control candidate merges to primary without requiring failure cluster targeting."""
+        import json
+        import hashlib
+        from merge_probe_results import merge_probe_results
+        from base_model_prober import _PROBING_POLICY_HASH, BASE_MODEL_ID
+
+        db_path = os.path.join(self.test_dir, "test_merge_uni.db")
+        approved_jsonl = os.path.join(self.test_dir, "test_merge_uni_app.jsonl")
+        aux_jsonl = os.path.join(self.test_dir, "test_merge_uni_aux.jsonl")
+        probes_path = os.path.join(self.test_dir, "test_merge_uni_probes.jsonl")
+
+        ledger = ExperimentLedger(db_path=db_path, jsonl_path=approved_jsonl, aux_jsonl_path=aux_jsonl)
+        entry = LedgerEntry(
+            problem_id="PROB_MERGE_UNI_01",
+            seed=4001,
+            target_failure_cluster="UNIFORM_CONTROL",
+            monotonic_queue_subtype="Type A: sliding-window extrema",
+            target_validation_status="NOT_APPLICABLE",
+            target_evidence="{}",
+            probe_result_hash="",
+            generator_model="gemini-3.6-flash",
+            fallback_used=False,
+            primary_eligibility_status="PENDING_KAGGLE_PROBE",
+            phase_a_pass_count=20,
+            phase_b_pass=True,
+            verification_status="APPROVED",
+            ast_hash="ast_merge_uni",
+            similarity_score=0.10,
+        )
+        ledger.record_entry(entry)
+
+        raw_probe = {
+            "problem_id": "PROB_MERGE_UNI_01",
+            "base_model_id": BASE_MODEL_ID,
+            "probing_policy_version": "v1.0_qwen25_1.5b_instruct",
+            "probing_policy_hash": _PROBING_POLICY_HASH,
+            "probe_timestamp": 1787770000.0,
+            "probe_seeds": [101],
+            "pass1": 0.0,
+            "pass10": 0.2,
+            "empirical_difficulty": 0.8,
+            "failure_cluster_id": "FC_08_UNKNOWN",
+            "failure_category": "UNKNOWN_ERROR",
+            "failure_evidence": {},
+            "tokenizer_vocab_size": 151936,
+            "tokenizer_name_or_path": BASE_MODEL_ID,
+        }
+        probe_hash = hashlib.sha256(json.dumps(raw_probe, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+        probe_rec = {
+            "problem_id": "PROB_MERGE_UNI_01",
+            "condition_type": "UNIFORM",
+            "target_failure_cluster": "UNIFORM_CONTROL",
+            "target_validation_status": "NOT_APPLICABLE",
+            "target_evidence": {},
+            "base_pass1": 0.0,
+            "base_pass10": 0.2,
+            "empirical_difficulty": 0.8,
+            "probe_result_hash": probe_hash,
+            "probe_timestamp": 1787770000.0,
+            "base_model_id": BASE_MODEL_ID,
+            "probing_policy_version": "v1.0_qwen25_1.5b_instruct",
+            "probing_policy_hash": _PROBING_POLICY_HASH,
+            "raw_probe_result": raw_probe,
+        }
+        with open(probes_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(probe_rec) + "\n")
+
+        summary = merge_probe_results(
+            probes_path=probes_path,
+            db_path=db_path,
+            approved_jsonl=approved_jsonl,
+            aux_jsonl=aux_jsonl,
+        )
+        self.assertEqual(summary["primary_approved"], 1)
+        self.assertEqual(summary["auxiliary_routed"], 0)
+
+        entries = ledger.get_primary_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["target_validation_status"], "NOT_APPLICABLE")
+        self.assertEqual(entries[0]["primary_eligibility_status"], "PRIMARY_ELIGIBLE")
+
+    def test_62_fallback_candidate_remains_auxiliary_after_merge(self):
+        """Test 62: Fallback-generated candidate remains auxiliary even if empirical probe succeeds."""
+        import json
+        import hashlib
+        from merge_probe_results import merge_probe_results
+        from base_model_prober import _PROBING_POLICY_HASH, BASE_MODEL_ID
+
+        db_path = os.path.join(self.test_dir, "test_merge_fb.db")
+        approved_jsonl = os.path.join(self.test_dir, "test_merge_fb_app.jsonl")
+        aux_jsonl = os.path.join(self.test_dir, "test_merge_fb_aux.jsonl")
+        probes_path = os.path.join(self.test_dir, "test_merge_fb_probes.jsonl")
+
+        ledger = ExperimentLedger(db_path=db_path, jsonl_path=approved_jsonl, aux_jsonl_path=aux_jsonl)
+        entry = LedgerEntry(
+            problem_id="PROB_MERGE_FB_01",
+            seed=4002,
+            target_failure_cluster="FC_01_MICRO_CORRECTNESS",
+            monotonic_queue_subtype="Type A: sliding-window extrema",
+            target_validation_status="PENDING_PROBE",
+            target_evidence="{}",
+            probe_result_hash="",
+            generator_model="gemini-3.1-flash-lite",
+            fallback_used=True,
+            fallback_used_pass1=True,
+            fallback_reason="APITimeoutError: Request timed out.",
+            primary_eligibility_status="PENDING_KAGGLE_PROBE",
+            phase_a_pass_count=20,
+            phase_b_pass=True,
+            verification_status="APPROVED",
+            ast_hash="ast_merge_fb",
+            similarity_score=0.10,
+        )
+        ledger.record_entry(entry)
+
+        raw_probe = {
+            "problem_id": "PROB_MERGE_FB_01",
+            "base_model_id": BASE_MODEL_ID,
+            "probing_policy_version": "v1.0_qwen25_1.5b_instruct",
+            "probing_policy_hash": _PROBING_POLICY_HASH,
+            "probe_timestamp": 1787770000.0,
+            "probe_seeds": [101],
+            "pass1": 0.0,
+            "pass10": 0.0,
+            "empirical_difficulty": 1.0,
+            "failure_cluster_id": "FC_01_MICRO_CORRECTNESS",
+            "failure_category": "CORRECTNESS_FAILURE_MICRO",
+            "failure_evidence": {"exception_type": "MismatchError", "error_msg": "Mismatch"},
+            "tokenizer_vocab_size": 151936,
+            "tokenizer_name_or_path": BASE_MODEL_ID,
+        }
+        probe_hash = hashlib.sha256(json.dumps(raw_probe, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+        probe_rec = {
+            "problem_id": "PROB_MERGE_FB_01",
+            "condition_type": "TARGETED",
+            "target_failure_cluster": "FC_01_MICRO_CORRECTNESS",
+            "target_validation_status": "VALIDATED",
+            "target_evidence": raw_probe["failure_evidence"],
+            "base_pass1": 0.0,
+            "base_pass10": 0.0,
+            "empirical_difficulty": 1.0,
+            "probe_result_hash": probe_hash,
+            "probe_timestamp": 1787770000.0,
+            "base_model_id": BASE_MODEL_ID,
+            "probing_policy_version": "v1.0_qwen25_1.5b_instruct",
+            "probing_policy_hash": _PROBING_POLICY_HASH,
+            "raw_probe_result": raw_probe,
+        }
+        with open(probes_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(probe_rec) + "\n")
+
+        summary = merge_probe_results(
+            probes_path=probes_path,
+            db_path=db_path,
+            approved_jsonl=approved_jsonl,
+            aux_jsonl=aux_jsonl,
+        )
+        self.assertEqual(summary["primary_approved"], 0)
+        self.assertEqual(summary["auxiliary_routed"], 1)
+        self.assertFalse(os.path.exists(approved_jsonl))
+        self.assertTrue(os.path.exists(aux_jsonl))
+
 
 if __name__ == "__main__":
     unittest.main()

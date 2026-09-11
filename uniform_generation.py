@@ -18,6 +18,7 @@ import random
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 
@@ -37,12 +38,20 @@ from targeted_generation import (
     SUBTYPES,
     _MODEL_PRIORITY,
     _call_llm_paced,
-    _get_prober,
     client_side_pace,
     parse_block_content,
 )
 from base_model_prober import BaseModelProber
 from quality_gates import check_primary_uniform_eligibility
+
+_base_model_prober: Optional[BaseModelProber] = None
+
+
+def _get_prober() -> BaseModelProber:
+    global _base_model_prober
+    if _base_model_prober is None:
+        _base_model_prober = BaseModelProber()
+    return _base_model_prober
 
 
 load_dotenv()
@@ -130,20 +139,27 @@ def run_uniform_generation_pipeline(
     jsonl_path: str = "data/v7_uniform_approved_curriculum.jsonl",
     aux_jsonl_path: str = "data/v7_uniform_auxiliary_curriculum.jsonl",
     batch_size: int = 1,
+    mode: str = "local",
+    probe_manifest_path: str = "data/v7_probe_manifest.jsonl",
     metrics: Optional[PipelineMetrics] = None,
 ) -> None:
     """
     Uniform sampling control generation loop with shared domain support and V7 primary gating.
 
     Args:
-        num_samples:    Number of verified, deduplicated primary samples to accept.
-        db_path:        SQLite ledger path for the uniform condition.
-        jsonl_path:     JSONL output path for the primary uniform condition.
-        aux_jsonl_path: JSONL output path for auxiliary uniform records.
-        batch_size:     Number of parallel generation calls per outer iteration.
-        metrics:        Optional PipelineMetrics instance.
+        num_samples:         Number of verified, deduplicated primary samples to generate.
+        db_path:             SQLite ledger path for the uniform condition.
+        jsonl_path:          JSONL output path for the primary uniform condition.
+        aux_jsonl_path:      JSONL output path for auxiliary uniform records.
+        batch_size:          Number of parallel generation calls per outer iteration.
+        mode:                Execution mode: 'local' (exports to probe manifest without loading Qwen)
+                             or 'probe-direct' (requires Kaggle/GPU environment).
+        probe_manifest_path: Path to write probe-required candidate manifest in local mode.
+        metrics:             Optional PipelineMetrics instance.
     """
-    print("=== STARTING UNIFORM SAMPLING CONTROL GENERATION PIPELINE ===")
+    from targeted_generation import _PROBING_POLICY_HASH
+
+    print(f"=== STARTING UNIFORM SAMPLING CONTROL GENERATION PIPELINE (MODE: {mode.upper()}) ===")
     manifest = create_generation_manifest(output_path="data/generation_manifest_uniform.json")
     print(
         f"  [MANIFEST] Frozen manifest recorded (Freeze: {manifest.get('freeze_tag')}, "
@@ -365,83 +381,175 @@ def run_uniform_generation_pipeline(
                 metrics.record_dedup_rejection()
                 continue
 
-            # 5. Real Base-Model Probing (V7: Execution against frozen Qwen base model for difficulty)
-            prober = _get_prober()
-            probe_result = prober.probe(
-                problem_id=problem_id,
-                problem_spec=blocks["spec"],
-                solve_brute=blocks["solve_brute"],
-                test_gen=blocks["test_gen"],
-                seed=b_seed_val,
-            )
-            pass1 = probe_result.pass1
-            pass10 = probe_result.pass10
-            diff = probe_result.empirical_difficulty
+            if mode == "local":
+                # --- LOCAL MODE (Safe: Never downloads, loads or initializes Qwen) ---
+                manifest_entry = {
+                    "problem_id": problem_id,
+                    "seed": b_seed_val,
+                    "condition_type": "UNIFORM",
+                    "target_failure_cluster": "UNIFORM_CONTROL",
+                    "monotonic_queue_subtype": subtype,
+                    "spec": blocks["spec"],
+                    "solve_opt": blocks["solve_opt"],
+                    "solve_brute": blocks["solve_brute"],
+                    "test_gen": blocks["test_gen"],
+                    "prompt_hash": prompt_hash,
+                    "generator_model": effective_model,
+                    "generator_model_pass1": m1,
+                    "generator_model_pass2": m2,
+                    "generator_policy": "EXPERIMENTAL_GENERATOR_POLICY",
+                    "fallback_used": gen_fallback_used,
+                    "fallback_used_pass1": fb1,
+                    "fallback_used_pass2": fb2,
+                    "fallback_reason": gen_fallback_reason,
+                    "fallback_reason_pass1": fb_r1,
+                    "fallback_reason_pass2": fb_r2,
+                    "verification_status": "APPROVED",
+                    "phase_a_pass_count": ver_res["phase_a_pass_count"],
+                    "phase_b_pass": ver_res["phase_b_pass"],
+                    "oracle_confidence": ver_res["confidence"],
+                    "ast_hash": dedup_res.ast_hash,
+                    "cfg_hash": dedup_res.cfg_hash,
+                    "similarity_score": dedup_res.similarity_score,
+                    "protocol_version": "v7.0",
+                    "probing_policy_version": "v1.0_qwen25_1.5b_instruct",
+                    "probing_policy_hash": _PROBING_POLICY_HASH,
+                    "base_model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+                }
+                out_mfile = Path(probe_manifest_path)
+                out_mfile.parent.mkdir(parents=True, exist_ok=True)
+                with open(out_mfile, "a", encoding="utf-8") as mf:
+                    mf.write(json.dumps(manifest_entry, sort_keys=True) + "\n")
 
-            probe_dict_json = json.dumps(probe_result.to_dict(), sort_keys=True)
-            probe_hash = hashlib.sha256(probe_dict_json.encode()).hexdigest()[:16]
-            target_evidence_json = json.dumps(probe_result.failure_evidence)
-
-            # 6. Construct Ledger Entry
-            entry = LedgerEntry(
-                problem_id=problem_id,
-                seed=b_seed_val,
-                generator_model=effective_model,
-                generator_version="v1.0",
-                prompt_hash=prompt_hash,
-                target_failure_cluster="UNIFORM_CONTROL",
-                monotonic_queue_subtype=subtype,
-                # Target attribution (NOT_APPLICABLE for uniform control)
-                target_validation_status="NOT_APPLICABLE",
-                target_evidence=target_evidence_json,
-                probe_result_hash=probe_hash,
-                # Generator policy fields
-                generator_policy="EXPERIMENTAL_GENERATOR_POLICY",
-                generator_model_pass1=m1,
-                generator_model_pass2=m2,
-                fallback_used=gen_fallback_used,
-                fallback_used_pass1=fb1,
-                fallback_used_pass2=fb2,
-                fallback_reason=gen_fallback_reason,
-                fallback_reason_pass1=fb_r1,
-                fallback_reason_pass2=fb_r2,
-                # Difficulty from real probe
-                base_pass1=pass1,
-                base_pass10=pass10,
-                empirical_difficulty=diff,
-                oracle_confidence=ver_res["confidence"],
-                phase_a_pass_count=ver_res["phase_a_pass_count"],
-                phase_b_pass=ver_res["phase_b_pass"],
-                verification_status="APPROVED",
-                ast_hash=dedup_res.ast_hash,
-                cfg_hash=dedup_res.cfg_hash,
-                similarity_score=dedup_res.similarity_score,
-                acceptance_reason="Approved uniform control candidate [target_validation=NOT_APPLICABLE]",
-                code_content=full_code,
-                spec=blocks["spec"],
-            )
-
-            # 7. V7 Authoritative Primary Eligibility Gate (Uniform)
-            eligibility = check_primary_uniform_eligibility(entry)
-            entry.primary_eligibility_status = eligibility["status"]
-            entry.primary_eligibility_reason = (
-                "; ".join(eligibility["reasons"]) if eligibility["reasons"] else "Meets all primary invariants"
-            )
-
-            ledger.record_entry(entry)
-
-            if eligibility["is_primary"]:
-                accepted += 1
-                metrics.record_approved(cluster="UNIFORM_CONTROL")
-                print(
-                    f"  [✓] ACCEPTED AS PRIMARY (CONTROL) [{accepted}/{num_samples}]: {problem_id} "
-                    f"(Diff: {diff:.2f}, AST: {dedup_res.ast_hash})"
+                entry = LedgerEntry(
+                    problem_id=problem_id,
+                    seed=b_seed_val,
+                    generator_model=effective_model,
+                    generator_version="v1.0",
+                    prompt_hash=prompt_hash,
+                    target_failure_cluster="UNIFORM_CONTROL",
+                    monotonic_queue_subtype=subtype,
+                    target_validation_status="NOT_APPLICABLE",
+                    target_evidence="{}",
+                    probe_result_hash="",
+                    generator_policy="EXPERIMENTAL_GENERATOR_POLICY",
+                    generator_model_pass1=m1,
+                    generator_model_pass2=m2,
+                    fallback_used=gen_fallback_used,
+                    fallback_used_pass1=fb1,
+                    fallback_used_pass2=fb2,
+                    fallback_reason=gen_fallback_reason,
+                    fallback_reason_pass1=fb_r1,
+                    fallback_reason_pass2=fb_r2,
+                    base_pass1=0.0,
+                    base_pass10=0.0,
+                    empirical_difficulty=0.0,
+                    oracle_confidence=ver_res["confidence"],
+                    phase_a_pass_count=ver_res["phase_a_pass_count"],
+                    phase_b_pass=ver_res["phase_b_pass"],
+                    verification_status="APPROVED",
+                    ast_hash=dedup_res.ast_hash,
+                    cfg_hash=dedup_res.cfg_hash,
+                    similarity_score=dedup_res.similarity_score,
+                    acceptance_reason="Approved uniform control candidate (local); exported to probe manifest for Kaggle base difficulty measurement",
+                    code_content=full_code,
+                    spec=blocks["spec"],
+                    primary_eligibility_status="AUXILIARY_NON_PRIMARY" if gen_fallback_used else "PENDING_KAGGLE_PROBE",
+                    primary_eligibility_reason=(
+                        "Generator fallback activated (fallback output cannot enter primary dataset)"
+                        if gen_fallback_used
+                        else "Verified locally; awaiting Kaggle base difficulty measurement"
+                    ),
                 )
+                ledger.record_entry(entry)
+
+                if gen_fallback_used:
+                    print(
+                        f"  [-] NON-PRIMARY / AUXILIARY (FALLBACK): {problem_id} "
+                        f"— Reason: {entry.primary_eligibility_reason}"
+                    )
+                else:
+                    accepted += 1
+                    metrics.record_approved(cluster="UNIFORM_CONTROL")
+                    print(
+                        f"  [✓] EXPORTED FOR PROBING (CONTROL) [{accepted}/{num_samples}]: {problem_id} "
+                        f"-> {probe_manifest_path}"
+                    )
+                    print("      [LOCAL-GUARD] Qwen/Qwen2.5-1.5B-Instruct was NOT downloaded or loaded locally.")
+
             else:
-                print(
-                    f"  [-] NON-PRIMARY / AUXILIARY ({entry.primary_eligibility_status}): {problem_id} "
-                    f"— Reason: {entry.primary_eligibility_reason}"
+                # --- DIRECT PROBE MODE (Executed on Kaggle/GPU server with override) ---
+                prober = _get_prober()
+                probe_result = prober.probe(
+                    problem_id=problem_id,
+                    problem_spec=blocks["spec"],
+                    solve_brute=blocks["solve_brute"],
+                    test_gen=blocks["test_gen"],
+                    seed=b_seed_val,
                 )
+                pass1 = probe_result.pass1
+                pass10 = probe_result.pass10
+                diff = probe_result.empirical_difficulty
+
+                probe_dict_json = json.dumps(probe_result.to_dict(), sort_keys=True)
+                probe_hash = hashlib.sha256(probe_dict_json.encode()).hexdigest()[:16]
+                target_evidence_json = json.dumps(probe_result.failure_evidence)
+
+                entry = LedgerEntry(
+                    problem_id=problem_id,
+                    seed=b_seed_val,
+                    generator_model=effective_model,
+                    generator_version="v1.0",
+                    prompt_hash=prompt_hash,
+                    target_failure_cluster="UNIFORM_CONTROL",
+                    monotonic_queue_subtype=subtype,
+                    target_validation_status="NOT_APPLICABLE",
+                    target_evidence=target_evidence_json,
+                    probe_result_hash=probe_hash,
+                    generator_policy="EXPERIMENTAL_GENERATOR_POLICY",
+                    generator_model_pass1=m1,
+                    generator_model_pass2=m2,
+                    fallback_used=gen_fallback_used,
+                    fallback_used_pass1=fb1,
+                    fallback_used_pass2=fb2,
+                    fallback_reason=gen_fallback_reason,
+                    fallback_reason_pass1=fb_r1,
+                    fallback_reason_pass2=fb_r2,
+                    base_pass1=pass1,
+                    base_pass10=pass10,
+                    empirical_difficulty=diff,
+                    oracle_confidence=ver_res["confidence"],
+                    phase_a_pass_count=ver_res["phase_a_pass_count"],
+                    phase_b_pass=ver_res["phase_b_pass"],
+                    verification_status="APPROVED",
+                    ast_hash=dedup_res.ast_hash,
+                    cfg_hash=dedup_res.cfg_hash,
+                    similarity_score=dedup_res.similarity_score,
+                    acceptance_reason="Approved uniform control candidate [target_validation=NOT_APPLICABLE]",
+                    code_content=full_code,
+                    spec=blocks["spec"],
+                )
+
+                eligibility = check_primary_uniform_eligibility(entry)
+                entry.primary_eligibility_status = eligibility["status"]
+                entry.primary_eligibility_reason = (
+                    "; ".join(eligibility["reasons"]) if eligibility["reasons"] else "Meets all primary invariants"
+                )
+
+                ledger.record_entry(entry)
+
+                if eligibility["is_primary"]:
+                    accepted += 1
+                    metrics.record_approved(cluster="UNIFORM_CONTROL")
+                    print(
+                        f"  [✓] ACCEPTED AS PRIMARY (CONTROL) [{accepted}/{num_samples}]: {problem_id} "
+                        f"(Diff: {diff:.2f}, AST: {dedup_res.ast_hash})"
+                    )
+                else:
+                    print(
+                        f"  [-] NON-PRIMARY / AUXILIARY ({entry.primary_eligibility_status}): {problem_id} "
+                        f"— Reason: {entry.primary_eligibility_reason}"
+                    )
 
     # Flush metrics on completion
     metrics.flush(
@@ -460,9 +568,25 @@ if __name__ == "__main__":
         default=1,
         help="Number of parallel generation calls per outer iteration (default: 1 = serial).",
     )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["local", "probe-direct"],
+        default="local",
+        help="Execution mode: 'local' (default, exports probe-required manifest without downloading Qwen) or 'probe-direct'.",
+    )
+    parser.add_argument(
+        "--probe-manifest",
+        type=str,
+        default="data/v7_probe_manifest.jsonl",
+        help="Output JSONL manifest path for candidates awaiting Kaggle probing.",
+    )
     args = parser.parse_args()
 
     run_uniform_generation_pipeline(
         num_samples=args.num_samples,
         batch_size=args.batch_size,
+        mode=args.mode,
+        probe_manifest_path=args.probe_manifest,
     )
+

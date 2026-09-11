@@ -69,24 +69,35 @@ GEMINI_API_KEY=your_api_key
 
 ## Running Phase 0
 
+### Workflow Overview (Local Generation + Remote Kaggle Probing)
+
+To support memory- and disk-constrained local development environments without compromising scientific rigor, candidate generation and verification run locally (with a strict local guard preventing `Qwen/Qwen2.5-1.5B-Instruct` downloads), while empirical base-model probing runs remotely on Kaggle GPUs:
+
 ```bash
-# 1. Base model failure attribution
-python failure_mapper.py
+# 1. Local Candidate Generation & Oracle Verification (Targeted)
+# Generates, verifies, deduplicates, and writes candidates to data/v7_probe_manifest.jsonl
+python targeted_generation.py --target-failure-cluster FC_01_MICRO_CORRECTNESS --num-samples 50 --mode local
 
-# 2. Targeted curriculum generation
-python targeted_generation.py --target-failure-cluster FC_01_MICRO_CORRECTNESS --num-samples 50
+# 2. Local Candidate Generation & Oracle Verification (Uniform Control)
+# Generates uniform control candidates and writes to data/v7_probe_manifest.jsonl
+python uniform_generation.py --num-samples 50 --mode local
 
-# 3. Uniform control generation
-python uniform_generation.py --num-samples 50
+# 3. Remote Base-Model Probing (Executed on Kaggle GPU)
+# Runs real Qwen/Qwen2.5-1.5B-Instruct Pass@1 / Pass@10 execution probing
+python kaggle_probe.py --manifest data/v7_probe_manifest.jsonl --output data/v7_kaggle_probe_results.jsonl
 
-# 4. Capability transfer analysis
+# 4. Local Ingestion & Primary Eligibility Merge
+# Verifies cryptographic provenance, applies V7 primary eligibility gates, and updates ledger
+python merge_probe_results.py --probes data/v7_kaggle_probe_results.jsonl
+
+# 5. Capability transfer analysis
 python transfer_matrix.py
 
-# 5. Statistical hypothesis evaluation
+# 6. Statistical hypothesis evaluation
 python statistical_analysis.py
 
-# 6. Run full integration test suite
-python -m unittest test_phase0_pipeline.py
+# 7. Run full integration test suite (77 tests)
+pytest -v test_phase0_pipeline.py
 ```
 
 ## Experimental Controls

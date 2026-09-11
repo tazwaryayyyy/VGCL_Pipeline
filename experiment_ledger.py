@@ -107,6 +107,10 @@ class ExperimentLedger:
             os.makedirs(os.path.dirname(self.aux_jsonl_path), exist_ok=True)
         self._init_sqlite()
 
+    def _ensure_tables(self) -> None:
+        """Idempotently ensure SQLite tables and columns exist."""
+        self._init_sqlite()
+
     def _init_sqlite(self) -> None:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()

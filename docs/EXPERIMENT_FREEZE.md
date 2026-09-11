@@ -336,6 +336,11 @@ Final pre-experiment scientific repair, primary dataset eligibility gating, and 
    - Added deterministic observable failure descriptions for all 8 clusters in `targeted_generation.py`.
 5. Dataset Namespaces & Historical Immutability:
    - Historical V5/V6 data preserved. Primary experimental runs write exclusively to V7 namespaces (`v7_approved_curriculum.jsonl`, `v7_experiment_ledger.db`, `v7_uniform_approved_curriculum.jsonl`, `v7_uniform_experiment_ledger.db`).
+6. Two-Stage Execution & Local Guard Architecture:
+   - Preserves low-resource local Windows machines: Qwen/Qwen2.5-1.5B-Instruct weights and inference are strictly offloaded to remote Kaggle GPU execution via `kaggle_probe.py`.
+   - Generation and oracle verification run locally with `--mode local`, registering candidates in the ledger as `PENDING_KAGGLE_PROBE` and emitting `data/v7_probe_manifest.jsonl`.
+   - Remote probing records are cryptographically verified and merged into `data/v7_approved_curriculum.jsonl` via `merge_probe_results.py`.
+   - Local guard ensures zero Qwen weight downloads on development machines without compromising the real base-model probe invariant.
 
 Date:
 2026-08-30
