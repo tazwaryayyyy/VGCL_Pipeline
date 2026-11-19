@@ -15,12 +15,12 @@ def main():
     print(f"Loading model and tokenizer ({MODEL_NAME}) on device: {device}...")
 
     tokenizer = AutoTokenizer.from_pretrained(
-        MODEL_NAME, trust_remote_code=True)
+        MODEL_NAME, trust_remote_code=False)
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
         torch_dtype=torch.float16 if device == "cuda" else torch.float32,
         device_map="auto" if device == "cuda" else None,
-        trust_remote_code=True
+        trust_remote_code=False
     )
     model.eval()
 

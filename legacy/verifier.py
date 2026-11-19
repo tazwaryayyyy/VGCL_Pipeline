@@ -3,17 +3,11 @@ import copy
 import io
 import json
 import math
-import multiprocessing as mp
 import os
 import sys
 import time
 import traceback
 from typing import Any, Dict, List, Optional, Tuple
-
-try:
-    import resource
-except ImportError:
-    resource = None
 
 ALLOWED_MODULES = {
     "math",
@@ -55,35 +49,6 @@ FORBIDDEN_ATTRIBUTES = {
 }
 
 
-def _set_hardened_sandbox_limits() -> None:
-    """Injects POSIX OS-level CPU limits where available and restricts network sockets."""
-    if resource and hasattr(resource, "RLIMIT_CPU"):
-        try:
-            resource.setrlimit(resource.RLIMIT_CPU, (2, 2))
-        except Exception:
-            pass
-
-    try:
-        import socket
-        socket.socket = None
-        socket.create_connection = None
-    except Exception:
-        pass
-
-
-def _check_peak_rss_limit() -> Optional[str]:
-    """Monitors peak RSS memory usage to prevent memory explosion."""
-    if resource and hasattr(resource, "getrusage"):
-        try:
-            max_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            limit_kb = 512 * 1024  # 512 MB in KB
-            if sys.platform == "darwin":
-                limit_kb *= 1024  # macOS reports in bytes
-            if max_rss > limit_kb:
-                return f"Memory Limit Exceeded: Peak RSS ({max_rss}) > 512MB"
-        except Exception:
-            pass
-    return None
 
 
 def _truncate_repr(obj: Any, max_len: int = 500) -> str:
@@ -206,158 +171,7 @@ def verify_ast_anti_cheat(code_str: str) -> Tuple[bool, str]:
     return True, "AST Anti-Cheat Passed"
 
 
-def _worker_exec_phase_a(code_str: str, seed: int, conn) -> None:
-    """Worker process for Phase A: Small-scale differential verification."""
-    _set_hardened_sandbox_limits()
-    exec_globals = {}
-    current_args = None
-    try:
-        exec(code_str, exec_globals)
-        solve = exec_globals["solve"]
-        solve_brute = exec_globals["solve_brute"]
-        gen_cases = exec_globals["generate_test_cases"]
 
-        test_cases = gen_cases(seed=seed, scale="small")[:20]
-
-        for idx, args in enumerate(test_cases):
-            pass_args = args if isinstance(args, (list, tuple)) else (args,)
-            current_args = pass_args
-
-            # Determine if any individual input element looks genuinely large-scale.
-            # Collection threshold: >= 10_000 items (e.g. arrays, strings, dicts).
-            # Scalar threshold: > 2_000_000_000 (2B).
-            #   Both canonical mod constants (1_000_000_007 and 998_244_353) are below
-            #   2B, so they receive full brute-force verification. Only iteration-space
-            #   scalars that would genuinely hang a Python loop (e.g. n=10^18) bypass it.
-            def _is_large_arg(a: object) -> bool:
-                if isinstance(a, (list, tuple, str, dict, set)) and len(a) >= 10_000:
-                    return True
-                if isinstance(a, (int, float)) and not isinstance(a, bool) and a > 2_000_000_000:
-                    return True
-                return False
-
-            _is_large = any(_is_large_arg(a) for a in pass_args)
-
-            ans_opt = solve(*copy.deepcopy(pass_args))
-
-            if not _is_large:
-                # Only run brute-force on small-scale inputs to avoid O(2^N) hangs.
-                ans_brute = solve_brute(*copy.deepcopy(pass_args))
-
-                if not _are_results_equal(ans_opt, ans_brute):
-                    conn.send(
-                        (
-                            False,
-                            f"Phase A Mismatch on small test #{idx + 1}: Optimal={_truncate_repr(ans_opt)} vs Brute={_truncate_repr(ans_brute)}",
-                            _truncate_repr(pass_args),
-                        )
-                    )
-                    return
-
-            mem_err = _check_peak_rss_limit()
-            if mem_err:
-                conn.send((False, f"Phase A {mem_err}", _truncate_repr(current_args)))
-                return
-
-        conn.send((True, "Phase A Passed", None))
-    except Exception as e:
-        tb_lines = traceback.format_exc()
-        input_str = _truncate_repr(current_args) if current_args is not None else "N/A"
-        conn.send((False, f"Phase A Runtime Exception: {type(e).__name__}: {e}\n{tb_lines[:300]}", input_str))
-
-
-def _worker_exec_phase_bc(code_str: str, seed: int, conn) -> None:
-    """Worker process for Phase B (Boundary) & Phase C (Perf/Memory & State Isolation)."""
-    _set_hardened_sandbox_limits()
-    exec_globals = {}
-    current_args = None
-    try:
-        exec(code_str, exec_globals)
-        solve = exec_globals["solve"]
-        gen_cases = exec_globals["generate_test_cases"]
-
-        boundary_cases = gen_cases(seed=seed, scale="small")
-        for args in boundary_cases[:3]:
-            pass_args = args if isinstance(args, (list, tuple)) else (args,)
-            current_args = pass_args
-
-            res_1 = solve(*copy.deepcopy(pass_args))
-            res_2 = solve(*copy.deepcopy(pass_args))
-            if not _are_results_equal(res_1, res_2):
-                conn.send(
-                    (
-                        False,
-                        "Phase B State Mutation Failure: consecutive calls produced different results.",
-                        _truncate_repr(pass_args),
-                    )
-                )
-                return
-
-        large_cases = gen_cases(seed=seed, scale="large")[:5]
-        for idx, args in enumerate(large_cases):
-            pass_args = args if isinstance(args, (list, tuple)) else (args,)
-            current_args = pass_args
-
-            start_t = time.perf_counter()
-            _ = solve(*pass_args)
-            elapsed = time.perf_counter() - start_t
-
-            if elapsed > 2.0:
-                conn.send(
-                    (
-                        False,
-                        f"Phase C Timeout: Large scale test #{idx + 1} took {elapsed:.4f}s (> 2.0s)",
-                        _truncate_repr(pass_args),
-                    )
-                )
-                return
-
-            mem_err = _check_peak_rss_limit()
-            if mem_err:
-                conn.send((False, f"Phase C {mem_err}", _truncate_repr(current_args)))
-                return
-
-        conn.send((True, "Phase B & C Passed", None))
-    except Exception as e:
-        tb_lines = traceback.format_exc()
-        input_str = _truncate_repr(current_args) if current_args is not None else "N/A"
-        conn.send((False, f"Phase B/C Exception: {type(e).__name__}: {e}\n{tb_lines[:300]}", input_str))
-
-
-def _safe_run_process(ctx: Any, target_func: Any, code_str: str, seed: int, timeout: float) -> Tuple[bool, str, Optional[str]]:
-    """Runs target_func in child process with non-blocking IPC polling to eliminate Pipe deadlocks."""
-    parent_conn, child_conn = ctx.Pipe(duplex=False)
-    p = ctx.Process(target=target_func, args=(code_str, seed, child_conn))
-    p.start()
-    child_conn.close()
-
-    result = None
-    start_time = time.time()
-    try:
-        while time.time() - start_time < timeout:
-            if parent_conn.poll(0.1):
-                result = parent_conn.recv()
-                break
-            if not p.is_alive():
-                break
-
-        p.join(timeout=max(0.1, timeout - (time.time() - start_time)))
-        if p.is_alive():
-            p.terminate()
-            p.join(timeout=1.0)
-            return False, f"Execution timed out (> {timeout:.1f}s wall clock)", None
-
-        if result is not None:
-            return result
-        return False, "Process exited unexpectedly without returning a result.", None
-    finally:
-        parent_conn.close()
-        if p.is_alive():
-            try:
-                p.kill()
-                p.join(timeout=0.5)
-            except Exception:
-                pass
 
 
 def run_full_verification(code_str: str, seed: int = 42) -> Tuple[bool, str, Optional[str]]:
@@ -366,13 +180,17 @@ def run_full_verification(code_str: str, seed: int = 42) -> Tuple[bool, str, Opt
     if not ast_ok:
         return False, ast_msg, None
 
-    ctx = mp.get_context("spawn")
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    try:
+        from isolated_executor import verify_legacy_phase_isolated
+    except ImportError:
+        from ..isolated_executor import verify_legacy_phase_isolated
 
-    ok_a, msg_a, input_a = _safe_run_process(ctx, _worker_exec_phase_a, code_str, seed, timeout=4.0)
+    ok_a, msg_a, input_a = verify_legacy_phase_isolated("a", code_str, seed, timeout_s=4.0)
     if not ok_a:
         return False, msg_a, input_a
 
-    ok_bc, msg_bc, input_bc = _safe_run_process(ctx, _worker_exec_phase_bc, code_str, seed, timeout=12.0)
+    ok_bc, msg_bc, input_bc = verify_legacy_phase_isolated("bc", code_str, seed, timeout_s=12.0)
     if not ok_bc:
         return False, msg_bc, input_bc
 
@@ -381,6 +199,11 @@ def run_full_verification(code_str: str, seed: int = 42) -> Tuple[bool, str, Opt
 
 def evaluate_and_route(raw_candidate_str: str) -> Dict[str, Any]:
     """Routes raw JSON strings or candidates through full verification for the salvage pipeline."""
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    try:
+        from isolated_executor import SandboxInfrastructureError
+    except ImportError:
+        from ..isolated_executor import SandboxInfrastructureError
     try:
         # Guard: if the string is a raw LLM generation failure message, quarantine it immediately
         # without attempting JSON deserialization (which would raise a split/parse error).
@@ -406,5 +229,7 @@ def evaluate_and_route(raw_candidate_str: str) -> Dict[str, Any]:
             return {"status": "QUARANTINE", "data": data, "reason": ver_msg, "failing_input": failing_input}
         else:
             return {"status": "REVIEW_QUEUE", "data": data, "reason": ver_msg, "failing_input": failing_input}
+    except SandboxInfrastructureError:
+        raise
     except Exception as e:
         return {"status": "QUARANTINE", "data": {"raw": raw_candidate_str}, "reason": f"ParseException: {e}", "failing_input": None}

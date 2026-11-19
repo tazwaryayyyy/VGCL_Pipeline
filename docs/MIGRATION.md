@@ -2,15 +2,15 @@
 
 ## Executive Notice: Development Frozen
 
-This document is a retrospective engineering record detailing the structural and architectural migrations executed across the development of the **VGCL Phase 0** pipeline up to its final archival freeze at commit `98398d6e49736d83fa3c39560d4d556a8a760419` (`98398d6`) on **11 September 2026**.
+This document is a retrospective engineering record detailing the structural and architectural migrations executed across the development of the **VGCL Phase 0** pipeline through its V7 experimental freeze (`98398d6e49736d83fa3c39560d4d556a8a760419`, `11 September 2026`) and its V8 security-hardening freeze (`phase0-experiment-freeze-v8`, `19 November 2026`).
 
-The migration procedures described below document how the pipeline evolved from early unconstrained prototypes into the final audited V7 architecture. They are preserved for historical provenance and reproducibility analysis, not as instructions for active development.
+The migration procedures described below document how the pipeline evolved from early unconstrained prototypes into the audited V7 architecture and hardened V8 execution boundary. They are preserved for historical provenance and reproducibility analysis, not as instructions for active development.
 
 ---
 
 ## 1. Summary of Major Systemic Migrations
 
-Over the course of revisions V1 through V7, five major systemic migrations were executed to resolve scientific and engineering vulnerabilities:
+Over the course of revisions V1 through V8, six major systemic migrations were executed to resolve scientific, engineering, and security vulnerabilities:
 
 ```
 [Early Prototype]
@@ -22,16 +22,18 @@ Paradigm-Driven Generation ──> Local Execution Attempt ──> Flat File Sto
                              - Silent fallback contamination
                              - Evaluation data leakage
                              - Semantic drift in subtypes
+                             - Untrusted in-process exec() / pickle IPC / trust_remote_code=True
                                       │
-                                      ▼ (Architectural Repairs)
-[Final V7 Frozen State]
-Two-Stage Execution Split (Local API Generation + Remote Kaggle GPU Probing)
+                                      ▼ (Architectural & Security Repairs)
+[Final V7 + V8 Frozen State]
+Two-Stage Execution Split (Local API Generation + Remote GPU Probing)
       │
-      ├──> Local Hardware Guard (base_model_prober.py)
+      ├──> Local Hardware Guard & trust_remote_code=False (base_model_prober.py)
+      ├──> Centralized Fail-Closed Sandbox Execution (isolated_executor.py)
       ├──> Authoritative Primary Eligibility Gating (quality_gates.py)
       ├──> Strict Auxiliary Segregation of Fallback Outputs
       ├──> Cryptographic Provenance Hashing (SHA-256)
-      └──> Dual SQLite + JSONL Immutable Ledger (experiment_ledger.py)
+      └──> Dual SQLite + JSONL Ledger (experiment_ledger.py)
 ```
 
 ---
@@ -44,12 +46,12 @@ Two-Stage Execution Split (Local API Generation + Remote Kaggle GPU Probing)
 - **Migration**: Replaced thematic prompts with explicit failure cluster specifications (`FC_01` through `FC_08`), backed by execution-grounded failure classification (`failure_mapper.py`).
 
 ### B. Transition from Local Model Probing to the Two-Stage Local/Kaggle Architecture
-- **Historical State**: Early implementations attempted to load `Qwen/Qwen2.5-1.5B-Instruct` directly in the local developer environment (Windows workstations with limited VRAM and system memory).
+- **Historical State**: Early implementations attempted to load `Qwen/Qwen2.5-1.5B-Instruct` directly in the local developer environment (workstations with limited VRAM and system memory).
 - **Vulnerability**: Local execution caused system out-of-memory errors, disk exhaustion from downloading model weights, and unreliable timeouts.
 - **Migration**:
   1. Divided the pipeline into two decoupled execution stages:
-     - **Stage 1 (Local Windows)**: API candidate generation, pre-oracle syntax repair, AST reference independence gating, subtype validation, two-phase differential verification, and CFG deduplication. Emits `data/v7_probe_manifest.jsonl`.
-     - **Stage 2 (Remote Kaggle GPU)**: `kaggle_probe.py` loads `Qwen/Qwen2.5-1.5B-Instruct` in an environment with dedicated GPU resources, runs greedy Pass@1 and sampled Pass@10 execution probing, and exports structured results with cryptographic hashes to `data/v7_kaggle_probe_results.jsonl`.
+     - **Stage 1 (Local)**: API candidate generation, pre-oracle syntax repair, AST reference independence gating, subtype validation, two-phase differential verification, and CFG deduplication. Emits `data/v7_probe_manifest.jsonl`.
+     - **Stage 2 (Remote GPU Host)**: `kaggle_probe.py` loads `Qwen/Qwen2.5-1.5B-Instruct` on a compliant GPU host, runs greedy Pass@1 and sampled Pass@10 execution probing, and exports structured results with cryptographic hashes to `data/v7_kaggle_probe_results.jsonl`.
   2. Implemented a strict **Local Hardware Guard** in `base_model_prober.py` that intercepts any local attempt to load Qwen weights and raises a descriptive `RuntimeError`.
   3. Implemented `merge_probe_results.py` to ingest remote probe outputs locally, verify cryptographic SHA-256 hashes against tampering, and perform primary eligibility gating.
 
@@ -69,6 +71,15 @@ Two-Stage Execution Split (Local API Generation + Remote Kaggle GPU Probing)
 - **Historical State**: Subtype schedulers adaptively prioritized subtypes that had low acceptance counts, but without restricting which subtypes could be paired with which failure targets.
 - **Vulnerability**: The generator drifted into producing easy-to-generate subtypes that were semantically incompatible with the requested failure cluster (e.g., requesting infinite-loop termination failures but generating sliding-window extrema problems).
 - **Migration**: Enforced `CLUSTER_SUBTYPE_COMPATIBILITY` mapping inside `SubtypeScheduler.select()`, failing closed if a requested cluster has no valid compatible subtypes.
+
+### F. Transition from In-Process `exec()` and Multiprocessing `pickle` to Fail-Closed Isolation (V8)
+- **Historical State**: Through V7, `base_model_prober.py` evaluated combined candidate/reference/test-generator strings via in-process `exec()`, `legacy/audit_curriculum.py` used direct `exec()`, `oracle_refactor.py` and `legacy/verifier.py` used separate `multiprocessing` workers with `pickle` pipes and shared namespaces, and model loaders passed `trust_remote_code=True`.
+- **Vulnerability**: Untrusted generated code executed inside the model-owning process or unhardened workers with access to secrets, host filesystem paths, network sockets, or forgeable IPC channels, while `trust_remote_code=True` allowed arbitrary remote model-repo code execution.
+- **Migration**:
+  1. Consolidated all untrusted execution (`base_model_prober.py`, `oracle_refactor.py`, `legacy/verifier.py`, `legacy/audit_curriculum.py`) into `isolated_executor.py`.
+  2. Separated `generate_test_cases`, `solve`, and `solve_brute` into independent sandbox invocations with parent-side differential comparison over bounded lossless tagged JSON IPC (zero `pickle`).
+  3. Implemented three-process non-dumpable supervisor/trusted-runner/candidate boundaries with per-run nonce authentication inside `ContainerSandbox` (digest-pinned Python image, `--network none`, `--read-only`, `--cap-drop ALL`, `--user 65534:65534`, zero host mounts) and `LinuxNamespaceSandbox` (unprivileged namespaces, `pivot_root`, `setrlimit`, architecture-verified `seccomp-bpf`).
+  4. Added `kaggle_probe.py` fail-closed `get_active_sandbox()` preflight and enforced `trust_remote_code=False` across probing and calibration loaders.
 
 ---
 
@@ -122,21 +133,118 @@ with open(legacy_path, "r", encoding="utf-8") as f:
 
 ## 4. Final Frozen Execution Commands
 
-To replicate the execution workflow of the final frozen V7 architecture:
+To replicate the execution workflow of the final frozen V7 + V8 architecture (requires a compliant container runtime with the pinned Python digest image cached, or a Linux host passing `LinuxNamespaceSandbox` capability checks):
 
 ```bash
+# 0. Pull pinned sandbox image if using container isolation
+docker pull python@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
+
 # 1. Local Candidate Generation & Oracle Verification (Targeted)
 python targeted_generation.py --target-failure-cluster FC_01_MICRO_CORRECTNESS --num-samples 50 --mode local
 
 # 2. Local Candidate Generation & Oracle Verification (Uniform Control)
 python uniform_generation.py --num-samples 50 --mode local
 
-# 3. Remote Base-Model Probing (Executed on Kaggle GPU)
+# 3. Remote Base-Model Probing (Executed on compliant GPU host)
 python kaggle_probe.py --manifest data/v7_probe_manifest.jsonl --output data/v7_kaggle_probe_results.jsonl
 
 # 4. Local Ingestion & Primary Eligibility Merge
 python merge_probe_results.py --probes data/v7_kaggle_probe_results.jsonl
 
-# 5. Integration Test Verification (77 passing tests)
-pytest test_phase0_pipeline.py
+# 5. Full Integration & Security Test Verification (179 tests via pytest.ini)
+VGCL_REQUIRE_SANDBOX=1 pytest -v
 ```
+```
+
+*(Note: verify `experiment_ledger.py` really has 37 columns as written in `CREATE TABLE IF NOT EXISTS ledger` — yes, the schema block itself in `REPRODUCIBILITY.md` has 37 columns, whereas the old text said "32 structured fields". Fixing "32" to "37" removes an internal mismatch in the doc!)*
+
+---
+
+### 3. Step-by-Step Git Commands (Clean Squash to `main`, Branch Deletion, `v8` Tag, Archive)
+
+Run these commands inside `D:\desktopnew\RES\vgcl_pipeline`:
+
+#### Step 1: Update the 4 `.md` files on `sec/sandbox-hardening-final` and verify CI
+
+```powershell
+git checkout sec/sandbox-hardening-final
+git status
+```
+
+Save the updated contents above into `README.md`, `docs/EXPERIMENT_FREEZE.md`, `docs/REPRODUCIBILITY.md`, and `docs/MIGRATION.md`, then verify:
+
+```powershell
+git diff --check
+python -m compileall -q -x "(\.venv|legacy/salvage_and_audit\.py|legacy/test_llm\.py)" .
+pytest -v
+```
+
+Commit the doc updates on `sec/sandbox-hardening-final` and push so GitHub Actions confirms green on the branch before touching `main`:
+
+```powershell
+git add README.md docs/EXPERIMENT_FREEZE.md docs/REPRODUCIBILITY.md docs/MIGRATION.md
+git commit -m "docs: update README and freeze docs for V8 security hardening"
+git push origin sec/sandbox-hardening-final
+```
+
+Wait until **GitHub -> Actions** passes green on `sec/sandbox-hardening-final` (usually a couple of minutes; since `.md` changes sit alongside the workflow, let it finish green before squashing).
+
+#### Step 2: Confirm `main` is still clean at `acbea49` and squash-merge once
+
+```powershell
+git fetch origin --tags --prune
+git checkout main
+git pull --ff-only origin main
+git rev-parse HEAD
+```
+
+Confirm `git rev-parse HEAD` prints `acbea4949747a0966c2cc059418f960f5c506545`. Then squash-merge `sec/sandbox-hardening-final` onto `main`:
+
+```powershell
+git merge --squash sec/sandbox-hardening-final
+git status
+git diff --cached --stat
+git diff --check --cached
+```
+
+Create the single clean commit on `main`:
+
+```powershell
+git commit -m "Harden candidate execution with isolated fail-closed sandboxes"
+```
+
+Push `main`:
+
+```powershell
+git push origin main
+```
+
+Wait for **GitHub -> Actions** on `main` to finish green so `main` itself has a passing badge/run recorded.
+
+#### Step 3: Verify empty diff, delete `sec/sandbox-hardening-final`, and push `phase0-experiment-freeze-v8`
+
+Confirm `main` and `sec/sandbox-hardening-final` have identical file contents (`git diff` prints nothing):
+
+```powershell
+git diff main sec/sandbox-hardening-final
+```
+
+Delete the remote and local branch (using `-D` because `--squash` does not link branch history):
+
+```powershell
+git push origin --delete sec/sandbox-hardening-final
+git branch -D sec/sandbox-hardening-final
+```
+
+Grab the final `main` commit SHA (save this exact 40-character hash for Stage 2!) and create + push the V8 annotated tag:
+
+```powershell
+git rev-parse HEAD
+git tag -a phase0-experiment-freeze-v8 -m "V8 freeze: fail-closed OS/container sandbox execution and documentation sync"
+git push origin phase0-experiment-freeze-v8
+```
+
+#### Step 4: Create GitHub Release and Archive (Optional Final Lock)
+
+1. On GitHub, go to **Releases -> Draft a new release**, select tag `phase0-experiment-freeze-v8`, title it `Phase 0 Security Hardening Freeze (V8)`, note that V7 research methodology/prompts/gating remain unchanged, execution is now fail-closed via `isolated_executor.py`, CI passed green, and no new GPU probing/training run was executed.
+2. When completely done (and after grabbing `git rev-parse HEAD` for Stage 2), archive `tazwaryayyyy/VGCL_Pipeline` in **Settings -> General -> Danger Zone -> Archive this repository** if you want it read-only again.

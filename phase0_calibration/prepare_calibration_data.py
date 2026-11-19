@@ -14,7 +14,7 @@ def get_tokenizer():
     global _tokenizer
     if _tokenizer is None:
         from transformers import AutoTokenizer
-        _tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+        _tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=False)
     return _tokenizer
 
 

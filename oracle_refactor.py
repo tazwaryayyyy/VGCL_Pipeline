@@ -12,7 +12,6 @@ import copy
 import hashlib
 import json
 import math
-import multiprocessing as mp
 import os
 import sys
 import time
@@ -20,6 +19,7 @@ import traceback
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from isolated_executor import verify_oracle_phase_a_isolated, verify_oracle_phase_b_isolated
 from quality_gates import (
     _max_dimension,
     case_within_phase_a_policy,
@@ -27,11 +27,6 @@ from quality_gates import (
     derive_phase_a_scale_policy,
     extract_declared_constraints,
 )
-
-try:
-    import resource
-except ImportError:
-    resource = None
 
 
 # Allowed and forbidden security modules
@@ -62,72 +57,8 @@ class QuarantineArtifact:
     timestamp: float
 
 
-def _set_sandbox_limits() -> None:
-    """Sets system sandbox limits for process worker."""
-    if resource and hasattr(resource, "RLIMIT_CPU"):
-        try:
-            resource.setrlimit(resource.RLIMIT_CPU, (3, 3))
-        except Exception:
-            pass
-    try:
-        import socket
-        socket.socket = None
-        socket.create_connection = None
-    except Exception:
-        pass
 
 
-def _check_memory_rss() -> Optional[str]:
-    """Checks peak memory RSS limit (512MB)."""
-    if resource and hasattr(resource, "getrusage"):
-        try:
-            max_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            limit_kb = 512 * 1024
-            if sys.platform == "darwin":
-                limit_kb *= 1024
-            if max_rss > limit_kb:
-                return f"Memory Limit Exceeded: Peak RSS ({max_rss}) > 512MB"
-        except Exception:
-            pass
-    return None
-
-
-def _truncate_val(obj: Any, max_len: int = 500) -> str:
-    try:
-        r = repr(obj)
-        return r[:max_len] + "... [TRUNCATED]" if len(r) > max_len else r
-    except Exception:
-        return "<Unrepresentable Object>"
-
-
-def _are_outputs_equal(a: Any, b: Any, rel_tol: float = 1e-6, abs_tol: float = 1e-6) -> bool:
-    if hasattr(a, "item"):
-        a = a.item()
-    if hasattr(b, "item"):
-        b = b.item()
-
-    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
-        if len(a) != len(b):
-            return False
-        return all(_are_outputs_equal(x, y, rel_tol, abs_tol) for x, y in zip(a, b))
-
-    if type(a) is not type(b):
-        if isinstance(a, bool) or isinstance(b, bool):
-            return False
-        if not (isinstance(a, (int, float)) and isinstance(b, (int, float))):
-            return False
-
-    if isinstance(a, float) or isinstance(b, float):
-        if math.isnan(a) and math.isnan(b):
-            return True
-        return math.isclose(a, b, rel_tol=rel_tol, abs_tol=abs_tol)
-
-    if isinstance(a, dict) and isinstance(b, dict):
-        if a.keys() != b.keys():
-            return False
-        return all(_are_outputs_equal(a[k], b[k], rel_tol, abs_tol) for k in a)
-
-    return a == b
 
 
 class SecurityASTVisitor(ast.NodeVisitor):
@@ -188,212 +119,6 @@ def verify_ast_security_and_contracts(code_str: str) -> Tuple[bool, str]:
     return True, "AST Security & Contract Passed"
 
 
-def _worker_phase_a(code_str: str, seed: int, conn) -> None:
-    """Worker process for Phase A (Correctness Gate N <= 8, adaptive cap)."""
-    _set_sandbox_limits()
-    exec_globals = {}
-    current_args = None
-    try:
-        exec(code_str, exec_globals)
-        solve = exec_globals["solve"]
-        solve_brute = exec_globals["solve_brute"]
-        gen_cases = exec_globals["generate_test_cases"]
-
-        phase_a_scale = derive_phase_a_scale_policy(code_str)
-        cap = int(phase_a_scale.get("maximum_dimension", 8))
-
-        # Pass explicit oracle scale cap to test generator where supported
-        import inspect
-        raw_cases = None
-        try:
-            sig = inspect.signature(gen_cases)
-            if "max_small_dimension" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
-                raw_cases = gen_cases(seed=seed, scale="small", max_small_dimension=cap)
-            elif len(sig.parameters) >= 3:
-                raw_cases = gen_cases(seed, "small", cap)
-            else:
-                raw_cases = gen_cases(seed=seed, scale="small")
-        except Exception:
-            raw_cases = gen_cases(seed=seed, scale="small")
-
-        raw_cases = raw_cases[:20] if raw_cases else []
-        gen_count = len(raw_cases)
-        test_cases = [
-            args for args in raw_cases
-            if case_within_phase_a_policy(args, phase_a_scale)
-        ]
-        admissible_count = len(test_cases)
-
-        if not test_cases:
-            conn.send({
-                "passed": False,
-                "reason": f"Phase A Scale Policy Rejected: no generated small cases within brute-force dimension cap ({cap})",
-                "failing_input": None,
-                "expected_output": None,
-                "actual_output": None,
-                "pass_count": 0,
-                "phase_a_scale": phase_a_scale,
-                "phase_a_scale_cap": cap,
-                "phase_a_generated_case_count": gen_count,
-                "phase_a_admissible_case_count": 0,
-                "phase_a_scale_policy": phase_a_scale.get("policy", "unknown"),
-            })
-            return
-        pass_count = 0
-
-        for idx, args in enumerate(test_cases):
-            pass_args = args if isinstance(args, (list, tuple)) else (args,)
-            current_args = pass_args
-
-            ans_opt = solve(*copy.deepcopy(pass_args))
-            ans_brute = solve_brute(*copy.deepcopy(pass_args))
-
-            if not _are_outputs_equal(ans_opt, ans_brute):
-                conn.send({
-                    "passed": False,
-                    "reason": f"Phase A Output Mismatch on test #{idx + 1}",
-                    "failing_input": _truncate_val(pass_args),
-                    "expected_output": _truncate_val(ans_brute),
-                    "actual_output": _truncate_val(ans_opt),
-                    "pass_count": pass_count,
-                    "phase_a_scale": phase_a_scale,
-                    "phase_a_scale_cap": cap,
-                    "phase_a_generated_case_count": gen_count,
-                    "phase_a_admissible_case_count": admissible_count,
-                    "phase_a_scale_policy": phase_a_scale.get("policy", "unknown"),
-                })
-                return
-
-            mem_err = _check_memory_rss()
-            if mem_err:
-                conn.send({
-                    "passed": False,
-                    "reason": f"Phase A {mem_err}",
-                    "failing_input": _truncate_val(current_args),
-                    "expected_output": None,
-                    "actual_output": None,
-                    "pass_count": pass_count,
-                    "phase_a_scale": phase_a_scale,
-                    "phase_a_scale_cap": cap,
-                    "phase_a_generated_case_count": gen_count,
-                    "phase_a_admissible_case_count": admissible_count,
-                    "phase_a_scale_policy": phase_a_scale.get("policy", "unknown"),
-                })
-                return
-            pass_count += 1
-
-        conn.send({
-            "passed": True,
-            "reason": "Phase A Passed",
-            "pass_count": pass_count,
-            "phase_a_scale": phase_a_scale,
-            "phase_a_scale_cap": cap,
-            "phase_a_generated_case_count": gen_count,
-            "phase_a_admissible_case_count": admissible_count,
-            "phase_a_scale_policy": phase_a_scale.get("policy", "unknown"),
-        })
-    except Exception as e:
-        tb = traceback.format_exc()
-        scale_pol = derive_phase_a_scale_policy(code_str)
-        conn.send({
-            "passed": False,
-            "reason": f"Phase A Exception: {type(e).__name__}: {e}\n{tb[:300]}",
-            "failing_input": _truncate_val(current_args) if current_args else None,
-            "expected_output": None,
-            "actual_output": None,
-            "pass_count": 0,
-            "phase_a_scale": scale_pol,
-            "phase_a_scale_cap": int(scale_pol.get("maximum_dimension", 8)),
-            "phase_a_generated_case_count": 0,
-            "phase_a_admissible_case_count": 0,
-            "phase_a_scale_policy": scale_pol.get("policy", "unknown"),
-        })
-
-
-def _worker_phase_b(code_str: str, seed: int, conn, spec_str: str = "") -> None:
-    """Worker process for Phase B (Complexity Gate with multi-scale constraint validation)."""
-    _set_sandbox_limits()
-    exec_globals = {}
-    current_args = None
-    try:
-        exec(code_str, exec_globals)
-        solve = exec_globals["solve"]
-        gen_cases = exec_globals["generate_test_cases"]
-
-        constraints = extract_declared_constraints(spec_str)
-        max_n = constraints.get("max_n", 100000)
-
-        large_cases = gen_cases(seed=seed, scale="large")[:5]
-        observed_runtimes: List[float] = []
-        observed_scales: List[int] = []
-
-        for idx, args in enumerate(large_cases):
-            pass_args = args if isinstance(args, (list, tuple)) else (args,)
-            current_args = pass_args
-            dim = _max_dimension(pass_args)
-            observed_scales.append(dim)
-
-            start_t = time.perf_counter()
-            res = solve(*copy.deepcopy(pass_args))
-            elapsed = time.perf_counter() - start_t
-            observed_runtimes.append(round(elapsed, 6))
-
-            if elapsed > 2.0:
-                conn.send({
-                    "passed": False,
-                    "reason": f"Phase B Time Bound Violation: Large test #{idx + 1} (dim={dim}) took {elapsed:.4f}s (> 2.0s)",
-                    "failing_input": _truncate_val(pass_args),
-                    "actual_output": _truncate_val(res),
-                    "declared_constraint_summary": constraints.get("summary", ""),
-                    "large_scale_parameter": max_n,
-                    "phase_b_test_scales": observed_scales,
-                    "observed_runtime_per_scale": observed_runtimes,
-                    "constraint_regime_status": "INCOMPATIBLE",
-                    "constraint_regime_reason": f"Runtime {elapsed:.4f}s exceeded 2.0s timeout at scale {dim}",
-                })
-                return
-
-            mem_err = _check_memory_rss()
-            if mem_err:
-                conn.send({
-                    "passed": False,
-                    "reason": f"Phase B {mem_err}",
-                    "failing_input": _truncate_val(current_args),
-                    "actual_output": None,
-                    "declared_constraint_summary": constraints.get("summary", ""),
-                    "large_scale_parameter": max_n,
-                    "phase_b_test_scales": observed_scales,
-                    "observed_runtime_per_scale": observed_runtimes,
-                    "constraint_regime_status": "INCOMPATIBLE",
-                    "constraint_regime_reason": f"Memory limit exceeded: {mem_err}",
-                })
-                return
-
-        conn.send({
-            "passed": True,
-            "reason": "Phase B Passed",
-            "declared_constraint_summary": constraints.get("summary", ""),
-            "large_scale_parameter": max_n,
-            "phase_b_test_scales": observed_scales,
-            "observed_runtime_per_scale": observed_runtimes,
-            "constraint_regime_status": "COMPATIBLE",
-            "constraint_regime_reason": "Observed runtime and memory scaling compatible with declared regime",
-        })
-    except Exception as e:
-        tb = traceback.format_exc()
-        constraints = extract_declared_constraints(spec_str)
-        conn.send({
-            "passed": False,
-            "reason": f"Phase B Exception: {type(e).__name__}: {e}\n{tb[:300]}",
-            "failing_input": _truncate_val(current_args) if current_args else None,
-            "actual_output": None,
-            "declared_constraint_summary": constraints.get("summary", ""),
-            "large_scale_parameter": constraints.get("max_n", 100000),
-            "phase_b_test_scales": [],
-            "observed_runtime_per_scale": [],
-            "constraint_regime_status": "INCOMPATIBLE",
-            "constraint_regime_reason": f"Exception during execution: {type(e).__name__}",
-        })
 
 
 class VerificationOracle:
@@ -632,38 +357,15 @@ class VerificationOracle:
                 ),
             }
 
-        ctx = mp.get_context("spawn")
-
-        # Phase A Execution
-        parent_conn, child_conn = ctx.Pipe(duplex=False)
-        p_a = ctx.Process(target=_worker_phase_a, args=(full_code, seed, child_conn))
-        p_a.start()
-        child_conn.close()
-
-        res_a = None
-        start_t = time.time()
-        while time.time() - start_t < 4.0:
-            if parent_conn.poll(0.1):
-                res_a = parent_conn.recv()
-                break
-            if not p_a.is_alive():
-                break
-        p_a.join(timeout=0.5)
-        if p_a.is_alive():
-            p_a.terminate()
-            p_a.join(timeout=0.5)
-            scale_pol = derive_phase_a_scale_policy(full_code)
-            res_a = {
-                "passed": False,
-                "reason": "Phase A Timeout (> 4s wall clock)",
-                "pass_count": 0,
-                "phase_a_scale": scale_pol,
-                "phase_a_scale_cap": int(scale_pol.get("maximum_dimension", 8)),
-                "phase_a_generated_case_count": 0,
-                "phase_a_admissible_case_count": 0,
-                "phase_a_scale_policy": scale_pol.get("policy", "unknown"),
-            }
-        parent_conn.close()
+        # Phase A Execution (OS/container isolated via isolated_executor)
+        res_a = verify_oracle_phase_a_isolated(
+            full_code=full_code,
+            seed=seed,
+            solve_opt=solve_opt,
+            solve_brute=solve_brute,
+            test_gen=test_gen,
+            timeout_s=4.0,
+        )
 
         if not res_a or not res_a.get("passed"):
             reason = res_a.get("reason", "Phase A Worker Exited Unexpectedly") if res_a else "Phase A Failure"
@@ -732,36 +434,15 @@ class VerificationOracle:
                 ),
             }
 
-        # Phase B Execution
-        parent_conn, child_conn = ctx.Pipe(duplex=False)
-        p_b = ctx.Process(target=_worker_phase_b, args=(full_code, seed, child_conn, spec))
-        p_b.start()
-        child_conn.close()
-
-        res_b = None
-        start_t = time.time()
-        while time.time() - start_t < 12.0:
-            if parent_conn.poll(0.1):
-                res_b = parent_conn.recv()
-                break
-            if not p_b.is_alive():
-                break
-        p_b.join(timeout=0.5)
-        if p_b.is_alive():
-            p_b.terminate()
-            p_b.join(timeout=0.5)
-            constraints = extract_declared_constraints(spec)
-            res_b = {
-                "passed": False,
-                "reason": "Phase B Timeout (> 12s wall clock)",
-                "declared_constraint_summary": constraints.get("summary", ""),
-                "large_scale_parameter": constraints.get("max_n", 100000),
-                "phase_b_test_scales": [],
-                "observed_runtime_per_scale": [],
-                "constraint_regime_status": "INCOMPATIBLE",
-                "constraint_regime_reason": "Phase B process exceeded 12s wall clock limit",
-            }
-        parent_conn.close()
+        # Phase B Execution (OS/container isolated via isolated_executor)
+        res_b = verify_oracle_phase_b_isolated(
+            full_code=full_code,
+            seed=seed,
+            solve_opt=solve_opt,
+            test_gen=test_gen,
+            spec=spec,
+            timeout_s=12.0,
+        )
 
         if not res_b or not res_b.get("passed"):
             reason = res_b.get("reason", "Phase B Worker Exited Unexpectedly") if res_b else "Phase B Failure"

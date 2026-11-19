@@ -31,9 +31,16 @@ import ast
 import copy
 import json
 import math
+import os
 import sys
 import traceback
 from typing import Any, List, Tuple
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    from isolated_executor import SandboxInfrastructureError, audit_entry_isolated
+except ImportError:
+    from ..isolated_executor import SandboxInfrastructureError, audit_entry_isolated
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -178,114 +185,18 @@ def audit(path: str = 'data/approved_curriculum.jsonl') -> None:
             else:
                 seen_seeds[seed] = i
 
-        # ── DYNAMIC CHECKS ─────────────────────────────────────────────────
+        # ── DYNAMIC CHECKS (Isolated Sandbox Execution) ────────────────────
         if not code.strip():
             all_issues.append((i, seed, par, flags))
             continue
 
-        g: dict = {}
         try:
-            exec(compile(code, '<entry>', 'exec'), g)
+            dynamic_flags = audit_entry_isolated(code=code, seed=seed or 42)
+            flags.extend(dynamic_flags)
+        except SandboxInfrastructureError:
+            raise
         except Exception as ex:
-            flags.append(f'CODE_EXEC_ERROR: failed to exec code: {type(ex).__name__}: {ex}')
-            all_issues.append((i, seed, par, flags))
-            continue
-
-        solve_fn  = g.get('solve')
-        brute_fn  = g.get('solve_brute')
-        gen_fn    = g.get('generate_test_cases')
-
-        if not callable(solve_fn):
-            flags.append('MISSING_SOLVE_FN: solve() not found after exec')
-        if not callable(brute_fn):
-            flags.append('MISSING_BRUTE_FN: solve_brute() not found after exec')
-        if not callable(gen_fn):
-            flags.append('MISSING_GEN_FN: generate_test_cases() not found after exec')
-            all_issues.append((i, seed, par, flags))
-            continue
-
-        # 10. test_gen execution
-        try:
-            small_cases = gen_fn(seed=seed or 42, scale='small')
-        except Exception as ex:
-            flags.append(f'TESTGEN_EXEC_ERROR(small): {type(ex).__name__}: {ex}')
-            all_issues.append((i, seed, par, flags))
-            continue
-
-        if not small_cases:
-            flags.append('TESTGEN_EMPTY: generate_test_cases returns no cases for scale=small')
-            all_issues.append((i, seed, par, flags))
-            continue
-
-        if not isinstance(small_cases, list):
-            flags.append(f'TESTGEN_BAD_TYPE: expected list, got {type(small_cases).__name__}')
-            all_issues.append((i, seed, par, flags))
-            continue
-
-        # 11. All args are bare integers (placeholder inputs like [(seed,)])
-        all_int_args = all(
-            isinstance(args, (list, tuple)) and
-            all(isinstance(a, int) and not isinstance(a, bool) and not isinstance(a, (list, tuple))
-                for a in (args if isinstance(args, (list, tuple)) else (args,)))
-            for args in small_cases
-        )
-        if all_int_args:
-            flags.append('TESTGEN_INT_ARGS: all test case args are bare integers (no real inputs)')
-
-        # 12 + 13. Run solve and solve_brute, check differential + constant output
-        opt_results  = []
-        brute_results = []
-        diff_fail = False
-
-        for args in small_cases[:10]:
-            pass_args = tuple(args) if isinstance(args, (list, tuple)) else (args,)
-            try:
-                r_opt = solve_fn(*copy.deepcopy(list(pass_args)))
-                opt_results.append(r_opt)
-            except Exception as ex:
-                flags.append(f'SOLVE_EXEC_ERROR: {type(ex).__name__}: {ex}')
-                break
-
-            if not all_int_args:  # only diff-test when inputs are real
-                try:
-                    r_brute = brute_fn(*copy.deepcopy(list(pass_args)))
-                    brute_results.append(r_brute)
-                    if not _are_equal(r_opt, r_brute):
-                        flags.append(
-                            f'DIFFERENTIAL_FAIL: solve={r_opt!r} vs solve_brute={r_brute!r} '
-                            f'on args={str(pass_args)[:120]}'
-                        )
-                        diff_fail = True
-                        break
-                except Exception as ex:
-                    flags.append(f'BRUTE_EXEC_ERROR: {type(ex).__name__}: {ex}')
-                    break
-
-        # 14. Constant output (oracle blind)
-        if opt_results and not diff_fail:
-            if len(set(repr(r) for r in opt_results)) == 1 and len(opt_results) > 1:
-                flags.append(f'CONSTANT_OUTPUT: solve returns {opt_results[0]!r} on every test case')
-
-        # 15. Large-scale check
-        try:
-            large_cases = gen_fn(seed=seed or 42, scale='large')
-            if not large_cases:
-                flags.append('LARGE_EMPTY: generate_test_cases returns nothing for scale=large')
-            else:
-                small_size = max((_input_size(
-                    tuple(a) if isinstance(a, (list, tuple)) else (a,)
-                ) for a in small_cases), default=0)
-                large_size = max((_input_size(
-                    tuple(a) if isinstance(a, (list, tuple)) else (a,)
-                ) for a in large_cases), default=0)
-
-                if large_size <= small_size:
-                    flags.append(
-                        f'LARGE_NOT_BIGGER: large inputs (size={large_size}) are not '
-                        f'bigger than small inputs (size={small_size})'
-                    )
-        except Exception as ex:
-            flags.append(f'TESTGEN_EXEC_ERROR(large): {type(ex).__name__}: {ex}')
+            flags.append(f'SANDBOX_EXEC_ERROR: {type(ex).__name__}: {ex}')
 
         if flags:
             all_issues.append((i, seed, par, flags))

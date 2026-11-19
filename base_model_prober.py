@@ -157,7 +157,7 @@ class BaseModelProber:
                 flush=True,
             )
             self._tokenizer = AutoTokenizer.from_pretrained(
-                BASE_MODEL_ID, trust_remote_code=True
+                BASE_MODEL_ID, trust_remote_code=False
             )
             if self._tokenizer.pad_token_id is None:
                 self._tokenizer.pad_token_id = self._tokenizer.eos_token_id
@@ -166,7 +166,7 @@ class BaseModelProber:
                 BASE_MODEL_ID,
                 torch_dtype=torch.float16 if self._device == "cuda" else torch.float32,
                 device_map="auto" if self._device == "cuda" else None,
-                trust_remote_code=True,
+                trust_remote_code=False,
             )
             self._model.eval()
 
@@ -259,61 +259,17 @@ class BaseModelProber:
         seed: int,
     ) -> Tuple[bool, str, str, float, float]:
         """
-        Executes solve against solve_brute on small-scale test cases.
+        Executes solve against solve_brute on small-scale test cases inside an
+        OS-isolated sandbox environment.
         Returns (passed, exception_type, error_msg, execution_time, memory_mb).
         """
-        import copy, time
-        try:
-            import resource as _resource
-        except ImportError:
-            _resource = None
-        import sys as _sys
-
-        full_code = f"{solve_code}\n\n{solve_brute_code}\n\n{test_gen_code}"
-        try:
-            ast.parse(full_code)
-        except SyntaxError as e:
-            return False, "SyntaxError", str(e), 0.0, 0.0
-
-        exec_globals: Dict[str, Any] = {}
-        try:
-            exec(compile(full_code, "<candidate>", "exec"), exec_globals)  # nosec
-        except Exception as e:
-            return False, type(e).__name__, str(e), 0.0, 0.0
-
-        solve_fn = exec_globals.get("solve")
-        solve_brute_fn = exec_globals.get("solve_brute")
-        gen_cases_fn = exec_globals.get("generate_test_cases")
-
-        if solve_fn is None or gen_cases_fn is None:
-            return False, "MissingFunction", "solve or generate_test_cases not defined", 0.0, 0.0
-
-        try:
-            cases = gen_cases_fn(seed=seed, scale="small")[:10]
-        except Exception as e:
-            return False, type(e).__name__, f"test_gen failed: {e}", 0.0, 0.0
-
-        t0 = time.perf_counter()
-        for args in cases:
-            pass_args = args if isinstance(args, (list, tuple)) else (args,)
-            try:
-                out_opt = solve_fn(*copy.deepcopy(pass_args))
-                if solve_brute_fn is not None:
-                    out_brute = solve_brute_fn(*copy.deepcopy(pass_args))
-                    if out_opt != out_brute:
-                        elapsed = time.perf_counter() - t0
-                        return (
-                            False,
-                            "MismatchError",
-                            f"Phase A Mismatch: opt={out_opt!r} brute={out_brute!r}",
-                            elapsed,
-                            0.0,
-                        )
-            except Exception as e:
-                elapsed = time.perf_counter() - t0
-                return False, type(e).__name__, str(e), elapsed, 0.0
-        elapsed = time.perf_counter() - t0
-        return True, "", "", elapsed, 0.0
+        from isolated_executor import execute_candidate_isolated
+        return execute_candidate_isolated(
+            solve_code=solve_code,
+            test_gen_code=test_gen_code,
+            solve_brute_code=solve_brute_code,
+            seed=seed,
+        )
 
     # ------------------------------------------------------------------
     # Public API

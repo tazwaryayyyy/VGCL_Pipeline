@@ -27,6 +27,7 @@ from base_model_prober import (
     BaseModelProber,
     ProbingResult,
 )
+from isolated_executor import get_active_sandbox
 
 
 def run_kaggle_probing(
@@ -65,6 +66,8 @@ def run_kaggle_probing(
 
     # Instantiate prober (authorized for Kaggle / probe environment)
     if prober is None:
+        # Fail closed before downloading or loading Qwen weights if no compliant sandbox exists.
+        get_active_sandbox()
         prober = BaseModelProber(device=device, allow_local_probe=True)
 
     results = []
